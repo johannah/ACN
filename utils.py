@@ -55,8 +55,8 @@ def create_new_info_dict(arg_dict, size_training_set, base_filepath):
     if not os.path.exists(base_filepath):
         os.makedirs(base_filepath)
     info = {'train_cnts':[],
-            'train_losses':[],
-            'valid_losses':[],
+            'train_losses':{},
+            'valid_losses':{},
             'save_times':[],
             'args':[arg_dict],
             'last_save':0,
@@ -102,17 +102,33 @@ def rolling_average(a, n=5) :
     ret[n:] = ret[n:] - ret[:-n]
     return ret[n - 1:] / n
 
-def plot_losses(train_cnts, train_losses, test_cnts, test_losses, name='loss_example.png', rolling_length=4):
+def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', rolling_length=4):
     f,ax=plt.subplots(1,1,figsize=(3,3))
-    ax.plot(rolling_average(train_cnts, rolling_length), rolling_average(train_losses, rolling_length), label='train loss', lw=1, c='orangered')
-    ax.plot(rolling_average(test_cnts, rolling_length),  rolling_average(test_losses, rolling_length), label='test loss', lw=1, c='cornflowerblue')
-    ax.scatter(rolling_average(test_cnts, rolling_length), rolling_average(test_losses, rolling_length), s=4, c='cornflowerblue')
-    ax.scatter(rolling_average(train_cnts, rolling_length),rolling_average(train_losses, rolling_length), s=4, c='orangered')
+    test_cmap = matplotlib.cm.get_cmap('Blues')
+    train_cmap = matplotlib.cm.get_cmap('Greens')
+    color_idxs = np.linspace(.3,.75,num=len(train_losses.keys()))
+    test_colors = np.array([test_cmap(ci) for ci in color_idxs])
+    train_colors = np.array([train_cmap(ci) for ci in color_idxs])
+    for idx, key in enumerate(sorted(train_losses.keys())):
+        ax.plot(rolling_average(train_cnts, rolling_length),
+                rolling_average(train_losses[key], rolling_length),
+                label='train %s'%key, lw=1,
+                c=train_colors[idx])
+        ax.plot(rolling_average(train_cnts, rolling_length),
+                rolling_average(test_losses[key], rolling_length),
+                label='test %s'%key, lw=1,
+                c=test_colors[idx])
+        ax.scatter(rolling_average(train_cnts, rolling_length),
+               rolling_average(train_losses[key], rolling_length),
+                s=4, c=tuple(train_colors[idx][None]), marker='x')
+        ax.scatter(rolling_average(train_cnts, rolling_length),
+               rolling_average(test_losses[key], rolling_length),
+                s=4, c=tuple(test_colors[idx][None]), marker='o')
     ax.legend()
     plt.savefig(name)
     plt.close()
 
-def tsne_plot(X, images, color, num_clusters=30, perplexity=5, serve_port=8104, html_out_path='mpld3.html'):
+def tsne_plot(X, images, color, num_clusters=30, perplexity=5, serve_port=8104, html_out_path='mpld3.html', serve=False):
     from sklearn.manifold import TSNE
     import mpld3
     from skimage.transform import resize
@@ -140,7 +156,7 @@ def tsne_plot(X, images, color, num_clusters=30, perplexity=5, serve_port=8104, 
     # Define figure and axes, hold on to object since they're needed by mpld3
     fig, ax = plt.subplots(figsize=(8,8))
     # Make scatterplot and label axes, title
-    sc = ax.scatter(x,y,s=100,alpha=0.7, c=color, edgecolors='none')
+    sc = ax.scatter(x, y, s=100,alpha=0.7, c=color, edgecolors='none')
     plt.title("TSNE")
     # Create the mpld3 HTML tooltip plugin
     tooltip = mpld3.plugins.PointHTMLTooltip(sc, html_imgs)
@@ -149,12 +165,13 @@ def tsne_plot(X, images, color, num_clusters=30, perplexity=5, serve_port=8104, 
     #plugins.connect(fig, plugins.Reset(), plugins.BoxZoom(), plugins.Zoom())
     # Uncomment to save figure to html file
     out=mpld3.fig_to_html(fig)
-    print('writing to %s'%html_out_path)
+    print('writing tsne image to %s'%html_out_path)
     fpath = open(html_out_path, 'w')
     fpath.write(out)
     # display is used in jupyter
     #mpld3.display()
-    mpld3.show(port=serve_port, open_browser=False)
+    if serve==True:
+        mpld3.show(port=serve_port, open_browser=False)
 
 ##################################################################
 
@@ -177,8 +194,9 @@ def kl_loss_function(u_q, s_q, u_p, s_p):
          u_p: mean of conditional prior
          s_p: log std of conditional prior
 
+     reduction is sum over elements, then mean over batch
      Returns: loss
      '''
-    acn_KLD = torch.sum(s_p-s_q-0.5 + ((2*s_q).exp() + (u_q-u_p).pow(2)) / (2*(2*s_p).exp()))
+    acn_KLD = (s_p-s_q-0.5 + ((2*s_q).exp() + (u_q-u_p).pow(2)) / (2*(2*s_p).exp()))
     return acn_KLD
 
