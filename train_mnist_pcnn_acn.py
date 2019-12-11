@@ -41,22 +41,30 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
     epoch_cnt = 0
 
     # use argparse device no matter what info dict is loaded
-    preserve_args = ['device', 'batch_size', 'save_every_epochs', 'base_filepath']
-    preserve_dict = {}
-    for key in preserve_args:
-        preserve_dict[key] = info[key]
+    preserve_args = ['device', 'batch_size', 'save_every_epochs',
+                     'base_filepath', 'model_loadpath', 'perplexity',
+                     'use_targets']
+    largs = info['args']
+    #preserve_dict = {}
+    #for key in preserve_args:
+    #    preserve_dict[key] = info[key]
 
     if model_loadpath !='':
-        tmlp =  model_loadpath+'.tmp'
-        os.system('cp %s %s'%(model_loadpath, tmlp))
-        _dict = torch.load(tmlp, map_location=lambda storage, loc:storage)
-        info = _dict['info']
+        #tmlp =  model_loadpath+'.tmp'
+        #os.system('cp %s %s'%(model_loadpath, tmlp))
+        _dict = torch.load(model_loadpath, map_location=lambda storage, loc:storage)
+        dinfo = _dict['info']
+        pkeys = info.keys()
+        for key in dinfo.keys():
+            if key not in preserve_args or key not in pkeys:
+                info[key] = dinfo[key]
         train_cnt = info['train_cnts'][-1]
         epoch_cnt = info['epoch_cnt']
+        info['args'].append(largs)
 
-    # use argparse device no matter what device is loaded
-    for key in preserve_args:
-        info[key] = preserve_dict[key]
+    ## use argparse device no matter what device is loaded
+    #for key in preserve_args:
+    #    info[key] = preserve_dict[key]
 
     encoder_model = ConvEncoder(info['code_length'], input_size=info['input_channels'],
                             encoder_output_size=info['encoder_output_size']).to(info['device'])
@@ -83,55 +91,70 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
 
 def run_acn(train_cnt, model_dict, data_dict, phase, device):
     st = time.time()
-    running_loss = 0.0
+    rec_running = kl_running = sum_running = 0.0
     data_loader = data_dict[phase]
     model_dict = set_model_mode(model_dict, phase)
-    for batch_idx, (data, label, data_index) in enumerate(data_loader):
+    for idx, (data, label, batch_index) in enumerate(data_loader):
         target = data = data.to(device)
-        bs = data.shape[0]
+        bs,c,h,w = target.shape
         model_dict['opt'].zero_grad()
         z, u_q, s_q = model_dict['encoder_model'](data)
         # add the predicted codes to the input
         yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=data, float_condition=z))
-        model_dict['prior_model'].codes[data_index] = u_q.detach().cpu().numpy()
+        model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
         model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
         u_p, s_p = model_dict['prior_model'](u_q)
         kl = kl_loss_function(u_q, s_q, u_p, s_p)
-        rec_loss = F.binary_cross_entropy(yhat_batch, target, reduction='mean')
+        kl = info['kl_beta']*kl.view(bs*info['code_length']).sum(dim=-1).mean()
+        rec_loss = F.binary_cross_entropy(yhat_batch, target, reduction='none')
+        rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
+        sum_loss = F.binary_cross_entropy(yhat_batch, target, reduction='sum')
         loss = kl+rec_loss
         if phase == 'train':
             loss.backward()
             model_dict['opt'].step()
-        running_loss+= loss.item()
+        kl_running+= kl.item()
+        rec_running+= rec_loss.item()
+        sum_running+= sum_loss.item()
         # add batch size because it hasn't been added to train cnt yet
         if phase == 'train':
             train_cnt+=bs
     example = {'data':data, 'target':target, 'yhat':yhat_batch}
-    avg_loss = running_loss/bs
-    print("finished %s after %s secs at cnt %s loss %s"%(phase, time.time()-st, train_cnt, avg_loss))
-    return model_dict, data_dict, avg_loss, example
+    kl_avg = kl_running/bs
+    rec_avg = rec_running/bs
+    sum_avg = sum_running/bs
+    loss_avg = {'kl':kl_avg, 'rec':rec_avg, 'sum':sum_avg}
+    print("finished %s after %s secs at cnt %s rec %s kl %s"%(phase,
+                                                              time.time()-st,
+                                                              train_cnt,
+                                                              rec_avg, kl_avg))
+    return model_dict, data_dict, loss_avg, example
 
 def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info):
     base_filepath = info['base_filepath']
     base_filename = os.path.split(info['base_filepath'])[1]
     while train_cnt < info['num_examples_to_train']:
         print('starting epoch %s on %s'%(epoch_cnt, info['device']))
-        model_dict, data_dict, avg_train_loss, train_example = run_acn(train_cnt, model_dict, data_dict, phase='train', device=info['device'])
+        model_dict, data_dict, train_loss_avg, train_example = run_acn(train_cnt, model_dict, data_dict, phase='train', device=info['device'])
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
         if not epoch_cnt % info['save_every_epochs']:
             # make a checkpoint
             print('starting valid phase')
-            model_dict, data_dict, avg_valid_loss, valid_example = run_acn(train_cnt, model_dict, data_dict, phase='valid', device=info['device'])
+            model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt, model_dict, data_dict, phase='valid', device=info['device'])
+            for loss_key in valid_loss_avg.keys():
+                for lphase in ['train_losses', 'valid_losses']:
+                    if loss_key not in info[lphase].keys():
+                        info[lphase][loss_key] = []
+                info['valid_losses'][loss_key].append(valid_loss_avg[loss_key])
+                info['train_losses'][loss_key].append(train_loss_avg[loss_key])
 
             # store model
             state_dict = {}
             for key, model in model_dict.items():
                 state_dict[key+'_state_dict'] = model.state_dict()
 
-            info['train_losses'].append(avg_train_loss)
             info['train_cnts'].append(train_cnt)
-            info['valid_losses'].append(avg_valid_loss)
             info['epoch_cnt'] = epoch_cnt
             state_dict['info'] = info
 
@@ -146,7 +169,6 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info):
 
             plot_losses(info['train_cnts'],
                         info['train_losses'],
-                        info['train_cnts'],
                         info['valid_losses'], name=plot_filepath, rolling_length=1)
 
 def call_tsne_plot(model_dict, data_dict, info):
@@ -156,19 +178,26 @@ def call_tsne_plot(model_dict, data_dict, info):
     with torch.no_grad():
         for phase in ['valid', 'train']:
             data_loader = data_dict[phase]
-            with torch.no_grad():
-                for batch_idx, (data, label, data_index) in enumerate(data_loader):
-                    target = data = data.to(info['device'])
-                    # yhat_batch is bt 0-1
-                    z, u_q, s_q = model_dict['encoder_model'](data)
-                    u_p, s_p = model_dict['prior_model'](u_q)
-                    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
-                    html_path = info['model_loadpath'].replace('.pt', '.html')
-                    X = u_q.cpu().numpy()
+            for idx, (data, label, batch_idx) in enumerate(data_loader):
+                target = data = data.to(info['device'])
+                # yhat_batch is bt 0-1
+                z, u_q, s_q = model_dict['encoder_model'](data)
+                u_p, s_p = model_dict['prior_model'](u_q)
+                yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
+                X = u_q.cpu().numpy()
+                if info['use_targets']:
+                    images = target[:,0].cpu().numpy()
+                    T = 'target'
+                else:
                     images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
-                    #images = target[:,0].cpu().numpy()
-                    tsne_plot(X=X, images=images, color=batch_idx, perplexity=info['perplexity'],
-                              html_out_path=html_path)
+                    T = 'pred'
+                color = label
+                param_name = '_%s_P%s_%s.html'%(phase, info['perplexity'], T)
+                html_path = info['model_loadpath'].replace('.pt', param_name)
+                tsne_plot(X=X, images=images, color=color,
+                          perplexity=info['perplexity'],
+                          html_out_path=html_path, serve=False)
+                break
 
 def sample(model_dict, data_dict, info):
     from skvideo.io import vwrite
@@ -178,7 +207,7 @@ def sample(model_dict, data_dict, info):
         for phase in ['train', 'valid']:
             data_loader = data_dict[phase]
             with torch.no_grad():
-                for batch_idx, (data, label, data_index) in enumerate(data_loader):
+                for idx, (data, label, batch_idx) in enumerate(data_loader):
                     target = data = data.to(info['device'])
                     bs = data.shape[0]
                     z, u_q, s_q = model_dict['encoder_model'](data)
@@ -239,9 +268,11 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
+    parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
     # acn model setup
     parser.add_argument('-cl', '--code_length', default=64, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
+    parser.add_argument('-kl', '--kl_beta', default=.2, type=float, help='scale kl loss')
     parser.add_argument('--possible_values', default=1, help='num values that the pcnn output can take')
     parser.add_argument('--last_layer_bias', default=0.5, help='bias for output decoder')
     parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
@@ -249,7 +280,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_pcnn_layers', default=12, help='num layers for pixel cnn')
     # dataset setup
     parser.add_argument('-d',  '--dataset_name', default='FashionMNIST', help='which mnist to use', choices=['MNIST', 'FashionMNIST'])
-    parser.add_argument('--exp_name', default='pcnn_acn', help='name of experiment')
     parser.add_argument('--model_savedir', default='../model_savedir', help='save checkpoints here')
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # sampling info
@@ -257,11 +287,12 @@ if __name__ == '__main__':
     parser.add_argument('-tf', '--teacher_force', action='store_true', default=False)
     # tsne info
     parser.add_argument('-t', '--tsne', action='store_true', default=False)
-    parser.add_argument('-p', '--perplexity', default=3)
+    parser.add_argument('-p', '--perplexity', default=3, type=int, help='perplexity used in scikit-learn tsne call')
+    parser.add_argument('-ut', '--use_targets', default=False, action='store_true',  help='plot tsne with true target image instead of tf pred')
     args = parser.parse_args()
     if args.sample:
         # limit the batch size when sampling
-        args.batch_size = max([args.batch_size, 10])
+        args.batch_size = min([args.batch_size, 10])
 
     seed_everything(args.seed, args.num_threads)
     # get naming scheme
