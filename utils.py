@@ -104,7 +104,7 @@ def rolling_average(a, n=5) :
 
 def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', rolling_length=4):
     f,ax=plt.subplots(1,1,figsize=(3,3))
-    cmap = matplotlib.cm.get_cmap('Viridis')
+    cmap = matplotlib.cm.get_cmap('viridis')
     color_idxs = np.linspace(.1,.9,num=len(train_losses.keys()))
     colors = np.array([cmap(ci) for ci in color_idxs])
     for idx, key in enumerate(sorted(train_losses.keys())):
