@@ -104,26 +104,24 @@ def rolling_average(a, n=5) :
 
 def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', rolling_length=4):
     f,ax=plt.subplots(1,1,figsize=(3,3))
-    test_cmap = matplotlib.cm.get_cmap('Blues')
-    train_cmap = matplotlib.cm.get_cmap('Greens')
-    color_idxs = np.linspace(.3,.75,num=len(train_losses.keys()))
-    test_colors = np.array([test_cmap(ci) for ci in color_idxs])
-    train_colors = np.array([train_cmap(ci) for ci in color_idxs])
+    cmap = matplotlib.cm.get_cmap('Viridis')
+    color_idxs = np.linspace(.1,.9,num=len(train_losses.keys()))
+    colors = np.array([cmap(ci) for ci in color_idxs])
     for idx, key in enumerate(sorted(train_losses.keys())):
         ax.plot(rolling_average(train_cnts, rolling_length),
                 rolling_average(train_losses[key], rolling_length),
                 label='train %s'%key, lw=1,
-                c=train_colors[idx])
+                c=colors[idx])
         ax.plot(rolling_average(train_cnts, rolling_length),
                 rolling_average(test_losses[key], rolling_length),
                 label='test %s'%key, lw=1,
-                c=test_colors[idx])
+                c=colors[idx])
         ax.scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(train_losses[key], rolling_length),
-                s=4, c=tuple(train_colors[idx][None]), marker='x')
+                s=10, c=tuple(colors[idx][None]), marker='x')
         ax.scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(test_losses[key], rolling_length),
-                s=4, c=tuple(test_colors[idx][None]), marker='o')
+                s=10, c=tuple(colors[idx][None]), marker='o')
     ax.legend()
     plt.savefig(name)
     plt.close()
