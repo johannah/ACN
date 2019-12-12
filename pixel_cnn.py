@@ -112,12 +112,16 @@ class GatedMaskedConv2d(nn.Module):
         return out_v, out_h
 
 class GatedPixelCNN(nn.Module):
-    def __init__(self, input_dim=512, dim=256, n_layers=15, n_classes=None,
+    def __init__(self, input_dim=1, output_dim=1, dim=256, n_layers=15, n_classes=None,
                  spatial_condition_size=None, float_condition_size=None,
                  last_layer_bias=0.0, hsize=28, wsize=28):
         super(GatedPixelCNN, self).__init__()
-        # input_dim is the size of all possible values (in vqvae should be num_clusters)
+        ''' output_dim is the size of the output channels
+            dim
+            ---- not sure about possible_values
+        '''
         self.input_dim = input_dim
+        self.output_dim = output_dim
         self.dim = dim
         self.n_layers = n_layers
         self.n_classes = n_classes
@@ -126,6 +130,12 @@ class GatedPixelCNN(nn.Module):
         self.last_layer_bias = last_layer_bias
         self.hsize = hsize
         self.wsize = wsize
+        self.input_conv = nn.Sequential(
+                                         nn.Conv2d(self.input_dim, self.dim, 1),
+                                         nn.ReLU(True),
+                                         nn.Conv2d(self.dim, self.dim, 1)
+                                         )
+
 
         # build pixelcnn layers - functions like normal python list, but modules are registered
         self.layers = nn.ModuleList()
@@ -146,7 +156,7 @@ class GatedPixelCNN(nn.Module):
         self.output_conv = nn.Sequential(
                                          nn.Conv2d(self.dim, 512, 1),
                                          nn.ReLU(True),
-                                         nn.Conv2d(512, self.input_dim, 1)
+                                         nn.Conv2d(512, self.output_dim, 1)
                                          )
 
         # in pytorch - apply(fn)  recursively applies fn to every submodule as returned by .children
@@ -156,7 +166,7 @@ class GatedPixelCNN(nn.Module):
 
     def forward(self, x, class_condition=None, spatial_condition=None, float_condition=None):
         # data in x is (B,C,W,H)
-        xo = x
+        xo = self.input_conv(x)
         x_v, x_h = (xo,xo)
         for i, layer in enumerate(self.layers):
             x_v, x_h = layer(x_v=x_v, x_h=x_h, class_condition=class_condition,

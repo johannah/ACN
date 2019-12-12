@@ -22,16 +22,18 @@ from copy import deepcopy, copy
 from torch import nn, optim
 import torch
 from torch.nn import functional as F
-from torch.utils.data import Dataset, DataLoader
 from torchvision.utils import save_image
-from IPython import embed
+from torchvision import transforms
 
 from utils import create_new_info_dict, save_checkpoint, create_mnist_datasets, seed_everything
 from utils import plot_example, plot_losses
 from utils import set_model_mode, kl_loss_function
+from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
 from acn_models import ConvEncoder, PriorNetwork
+from IPython import embed
+
 
 def create_conv_acn_pcnn_models(info, model_loadpath=''):
     '''
@@ -43,11 +45,8 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
     # use argparse device no matter what info dict is loaded
     preserve_args = ['device', 'batch_size', 'save_every_epochs',
                      'base_filepath', 'model_loadpath', 'perplexity',
-                     'use_targets']
+                     'use_pred']
     largs = info['args']
-    #preserve_dict = {}
-    #for key in preserve_args:
-    #    preserve_dict[key] = info[key]
 
     if model_loadpath !='':
         #tmlp =  model_loadpath+'.tmp'
@@ -62,20 +61,26 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
         epoch_cnt = info['epoch_cnt']
         info['args'].append(largs)
 
-    ## use argparse device no matter what device is loaded
-    #for key in preserve_args:
-    #    info[key] = preserve_dict[key]
-
     encoder_model = ConvEncoder(info['code_length'], input_size=info['input_channels'],
                             encoder_output_size=info['encoder_output_size']).to(info['device'])
     prior_model = PriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
-    pcnn_decoder = GatedPixelCNN(input_dim=info['target_channels'],
-                                  dim=info['possible_values'],
-                                  n_layers=info['num_pcnn_layers'],
-                                  n_classes=info['num_classes'],
-                                  float_condition_size=info['code_length'],
-                                  last_layer_bias=info['last_layer_bias']).to(info['device'])
+
+    if info['rec_loss_type'] == 'dml':
+        # need to change architecture a bit for dml prediction
+        info['nmix'] =  (2*info['nr_logistic_mix']+info['nr_logistic_mix'])*info['target_channels']
+        pcnn_decoder = GatedPixelCNN(input_dim=1,
+                                     output_dim=info['nmix'],
+                                 dim=info['pixel_cnn_dim'],
+                                 n_layers=info['num_pcnn_layers'],
+                                 float_condition_size=info['code_length'],
+                                 last_layer_bias=info['last_layer_bias']).to(info['device'])
+    else:
+        pcnn_decoder = GatedPixelCNN(input_dim=1, output_dim=info['target_channels'],
+                                 dim=info['pixel_cnn_dim'],
+                                 n_layers=info['num_pcnn_layers'],
+                                 float_condition_size=info['code_length'],
+                                 last_layer_bias=info['last_layer_bias']).to(info['device'])
 
     model_dict = {'encoder_model':encoder_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder}
     parameters = []
@@ -91,23 +96,31 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
 
 def run_acn(train_cnt, model_dict, data_dict, phase, device):
     st = time.time()
-    run = rec_running = kl_running = sum_running = 0.0
+    run = rec_running = kl_running = loss_running = 0.0
     data_loader = data_dict[phase]
     model_dict = set_model_mode(model_dict, phase)
+    num_batches = len(data_loader)
     for idx, (data, label, batch_index) in enumerate(data_loader):
         target = data = data.to(device)
         bs,c,h,w = target.shape
         model_dict['opt'].zero_grad()
         z, u_q, s_q = model_dict['encoder_model'](data)
-        # add the predicted codes to the input
-        yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=data, float_condition=z))
-        model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
-        model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
+        if phase == 'train':
+            # fit knn during training
+            model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
+            model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
         u_p, s_p = model_dict['prior_model'](u_q)
+        # calculate loss
         kl = kl_loss_function(u_q, s_q, u_p, s_p)
         kl = info['kl_beta']*kl.view(bs*info['code_length']).sum(dim=-1).mean()
-        rec_loss = F.binary_cross_entropy(yhat_batch, target, reduction='none')
-        rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
+        yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
+        if info['rec_loss_type']  == 'bce':
+            rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction='none')
+            rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
+        if info['rec_loss_type'] == 'dml':
+            # TODO - what normalization is needed here
+            # input into dml should be bt -1 and 1
+            rec_loss = discretized_mix_logistic_loss(yhat_batch, target)
         loss = kl+rec_loss
         if phase == 'train':
             loss.backward()
@@ -115,11 +128,19 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
         run+=bs
         kl_running+= kl.item()
         rec_running+= rec_loss.item()
+        loss_running+= loss.item()
         # add batch size because it hasn't been added to train cnt yet
         if phase == 'train':
             train_cnt+=bs
-    example = {'data':data, 'target':target, 'yhat':yhat_batch}
-    loss_avg = {'kl':kl_running/bs, 'rec':rec_running/run, 'loss':(rec_running+kl_running)/run}
+        if idx == num_batches-2:
+            # store example near end for plotting
+            if info['rec_loss_type'] == 'dml':
+                yhat_batch = sample_from_discretized_mix_logistic(yhat_batch, info['nr_logistic_mix'])
+            example_images = rescale_inv(yhat_batch)
+            example_targets = rescale_inv(target)
+            example = {'data':data, 'target':example_targets, 'yhat':example_images}
+    # store average loss for return
+    loss_avg = {'kl':kl_running/bs, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
     print("finished %s after %s secs at cnt %s"%(phase,
                                                 time.time()-st,
                                                 train_cnt,
@@ -128,6 +149,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
     return model_dict, data_dict, loss_avg, example
 
 def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info):
+    print('starting training routine')
     base_filepath = info['base_filepath']
     base_filename = os.path.split(info['base_filepath'])[1]
     while train_cnt < info['num_examples_to_train']:
@@ -168,6 +190,65 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info):
                         info['train_losses'],
                         info['valid_losses'], name=plot_filepath, rolling_length=1)
 
+
+def latent_walk(model_dict, data_dict, info):
+    from skvideo.io import vwrite
+    model_dict = set_model_mode(model_dict, 'valid')
+    output_savepath = args.model_loadpath.replace('.pt', '')
+    phase = 'train'
+    data_loader = data_dict[phase]
+    bs = args.num_walk_steps
+    with torch.no_grad():
+        for walki in range(10):
+            for idx, (data, label, batch_idx) in enumerate(data_loader):
+                target = data = data.to(info['device'])
+                z, u_q, s_q = model_dict['encoder_model'](data)
+                break
+            _,c,h,w=target.shape
+            latents = torch.zeros((bs,z.shape[1]))
+            si = 0; ei = 1
+            sl = label[si].item(); el = label[ei].item()
+            print('walking from %s to %s'%(sl, el))
+            for code_idx in range(z.shape[1]):
+                s = z[si,code_idx]
+                e = z[ei,code_idx]
+                code_walk = torch.linspace(s,e,bs)
+                latents[:,code_idx] = code_walk
+            latents = latents.to(info['device'])
+            ## create blank canvas for autoregressive sampling
+            canvas = torch.zeros((bs,c,h,w))
+            for i in range(canvas.shape[1]):
+                for j in range(canvas.shape[2]):
+                    print('sampling row: %s'%j)
+                    for k in range(canvas.shape[3]):
+                        output = torch.sigmoid(model_dict['pcnn_decoder'](x=canvas, float_condition=latents))
+                        canvas[:,i,j,k] = output[:,i,j,k].detach()
+                        # add frames for video
+            npst = target[si:si+1].detach().cpu().numpy()
+            npen = target[ei:ei+1].detach().cpu().numpy()
+            npwalk = output.detach().cpu().numpy()
+            # add multiple frames of each sample as a hacky way to make the
+            # video more interpretable to humans
+            walk_video = np.concatenate((npst, npst,
+                                         npst, npst,
+                                         npst, npst))
+            for ww in range(npwalk.shape[0]):
+                walk_video = np.concatenate((walk_video,
+                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
+                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
+                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
+                                             ))
+            walk_video = np.concatenate((walk_video,
+                                         npen, npen,
+                                         npen, npen,
+                                         npen, npen))
+            walk_video = (walk_video*255).astype(np.uint8)
+            ## make movie
+            print('writing walk movie')
+            mname = output_savepath + '%s_s%s_e%s_walk.mp4'%(walki,sl,el)
+            vwrite(mname, walk_video)
+            print('finished %s'%mname)
+
 def call_tsne_plot(model_dict, data_dict, info):
     from utils import tsne_plot
     # always be in eval mode
@@ -182,12 +263,12 @@ def call_tsne_plot(model_dict, data_dict, info):
                 u_p, s_p = model_dict['prior_model'](u_q)
                 yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
                 X = u_q.cpu().numpy()
-                if info['use_targets']:
-                    images = target[:,0].cpu().numpy()
-                    T = 'target'
-                else:
+                if info['use_pred']:
                     images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
                     T = 'pred'
+                else:
+                    images = target[:,0].cpu().numpy()
+                    T = 'target'
                 color = label
                 param_name = '_%s_P%s_%s.html'%(phase, info['perplexity'], T)
                 html_path = info['model_loadpath'].replace('.pt', param_name)
@@ -266,15 +347,21 @@ if __name__ == '__main__':
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
     parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
+    # right now, still using float input for bce (which seemes to work) --
+    # should actually convert data to binary...
+    # if discretized mixture of logistics, we can predict pixel values. shape
+    # changes are required for output sampling
+    parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are bce or dml', choices=['bce', 'dml'])
+    parser.add_argument('--nr_logistic_mix', default=10, type=int)
     # acn model setup
     parser.add_argument('-cl', '--code_length', default=64, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
     parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
-    parser.add_argument('--possible_values', default=1, help='num values that the pcnn output can take')
-    parser.add_argument('--last_layer_bias', default=0.5, help='bias for output decoder')
+    parser.add_argument('--pixel_cnn_dim', default=64, help='TODO')
+    parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
     parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
-    parser.add_argument('--num_pcnn_layers', default=12, help='num layers for pixel cnn')
+    parser.add_argument('--num_pcnn_layers', default=8, help='num layers for pixel cnn')
     # dataset setup
     parser.add_argument('-d',  '--dataset_name', default='FashionMNIST', help='which mnist to use', choices=['MNIST', 'FashionMNIST'])
     parser.add_argument('--model_savedir', default='../model_savedir', help='save checkpoints here')
@@ -283,28 +370,49 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--sample', action='store_true', default=False)
     parser.add_argument('-tf', '--teacher_force', action='store_true', default=False)
     # tsne info
-    parser.add_argument('-t', '--tsne', action='store_true', default=False)
+    parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=3, type=int, help='perplexity used in scikit-learn tsne call')
-    parser.add_argument('-ut', '--use_targets', default=False, action='store_true',  help='plot tsne with true target image instead of tf pred')
+    parser.add_argument('-ut', '--use_pred', default=True, action='store_true',  help='plot tsne with pred image instead of target')
+    # walk-thru
+    parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
+    parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
+    parser.add_argument('-ed', '--end_label', default=5, type=int, help='end latent walk image from label')
+    parser.add_argument('-nw', '--num_walk_steps', default=30, type=int, help='number of steps in latent space between start and end image')
     args = parser.parse_args()
-    if args.sample:
-        # limit the batch size when sampling
-        args.batch_size = min([args.batch_size, 10])
+
 
     seed_everything(args.seed, args.num_threads)
     # get naming scheme
-    args.exp_name += '_'+args.dataset_name
+    args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type
     base_filepath = os.path.join(args.model_savedir, args.exp_name)
 
-    data_dict, size_training_set, nchans, hsize, wsize = create_mnist_datasets(dataset_name=args.dataset_name, base_datadir=args.base_datadir, batch_size=args.batch_size)
+    if args.rec_loss_type == 'bce':
+        # make binary data
+        rescale = lambda x: torch.round(x)
+        # no undoing this binary transform
+        rescale_inv = lambda x: x
+        args.last_layer_bias = 0.5
+    if args.rec_loss_type == 'dml':
+        # data going into dml should be bt -1 and 1
+        rescale = lambda x: (x - 0.5) * 2.
+        rescale_inv = lambda x: (0.5 * x) + 0.5
+        args.last_layer_bias = 0.0
+    dataset_transforms = transforms.Compose([transforms.ToTensor(), rescale])
+    data_dict, size_training_set, nchans, hsize, wsize = create_mnist_datasets(dataset_name=args.dataset_name, base_datadir=args.base_datadir, batch_size=args.batch_size, dataset_transforms=dataset_transforms)
     info = create_new_info_dict(vars(args), size_training_set, base_filepath)
     model_dict, info, train_cnt, epoch_cnt = create_conv_acn_pcnn_models(info, args.model_loadpath)
-
+    if args.tsne:
+        call_tsne_plot(model_dict, data_dict, info)
+    if args.sample or args.walk:
+        # limit the batch size when sampling/walk for reasonable memory use on cpu
+        args.batch_size = min([args.batch_size, 10])
+        data_dict, size_training_set, nchans, hsize, wsize = create_mnist_datasets(dataset_name=args.dataset_name, base_datadir=args.base_datadir, batch_size=args.batch_size)
     if args.sample:
         # limit batch size
         sample(model_dict, data_dict, info)
-    elif args.tsne:
-        call_tsne_plot(model_dict, data_dict, info)
-    else:
+    if args.walk:
+        latent_walk(model_dict, data_dict, info)
+    # only train if we weren't asked to do anything else
+    if not max([args.sample, args.tsne, args.walk]):
         train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info)
 
