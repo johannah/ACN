@@ -35,7 +35,7 @@ from acn_models import ConvEncoder, PriorNetwork
 from IPython import embed
 
 
-def create_conv_acn_pcnn_models(info, model_loadpath=''):
+def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     '''
     load details of previous model if applicable, otherwise create new models
     '''
@@ -48,9 +48,19 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
                      'use_pred']
     largs = info['args']
 
+    # setup loss-specific parameters for data
+    if info['rec_loss_type'] == 'dml':
+        # data going into dml should be bt -1 and 1
+        info['rescale'] = lambda x: (x - 0.5) * 2.
+        info['rescale_inv'] = lambda x: (0.5 * x) + 0.5
+    if info['rec_loss_type'] == 'bce':
+        # make binary data
+        info['rescale'] = lambda x: torch.round(x)
+        # no undoing this binary transform
+        info['rescale_inv'] = lambda x: x
+
+    # load model if given a path
     if model_loadpath !='':
-        #tmlp =  model_loadpath+'.tmp'
-        #os.system('cp %s %s'%(model_loadpath, tmlp))
         _dict = torch.load(model_loadpath, map_location=lambda storage, loc:storage)
         dinfo = _dict['info']
         pkeys = info.keys()
@@ -61,22 +71,39 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
         epoch_cnt = info['epoch_cnt']
         info['args'].append(largs)
 
+    # transform is dependent on loss type
+    dataset_transforms = transforms.Compose([transforms.ToTensor(), info['rescale']])
+    data_output = create_mnist_datasets(dataset_name=info['dataset_name'],
+                                                     base_datadir=info['base_datadir'],
+                                                     batch_size=info['batch_size'],
+                                                     dataset_transforms=dataset_transforms)
+    data_dict, size_training_set, num_input_chans, num_output_chans, hsize, wsize = data_output
+    info['size_training_set'] = size_training_set
+    info['num_input_chans'] = num_input_chans
+    info['num_output_chans'] = num_input_chans
+    info['hsize'] = hsize
+    info['wsize'] = wsize
+
+    # setup models
     encoder_model = ConvEncoder(info['code_length'], input_size=info['input_channels'],
                             encoder_output_size=info['encoder_output_size']).to(info['device'])
     prior_model = PriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
-
+    # pixel cnn architecture is dependent on loss
+    # for dml prediction, need to output mixture of size nmix
     if info['rec_loss_type'] == 'dml':
-        # need to change architecture a bit for dml prediction
-        info['nmix'] =  (2*info['nr_logistic_mix']+info['nr_logistic_mix'])*info['target_channels']
-        pcnn_decoder = GatedPixelCNN(input_dim=1,
-                                     output_dim=info['nmix'],
-                                 dim=info['pixel_cnn_dim'],
-                                 n_layers=info['num_pcnn_layers'],
-                                 float_condition_size=info['code_length'],
-                                 last_layer_bias=info['last_layer_bias']).to(info['device'])
-    else:
-        pcnn_decoder = GatedPixelCNN(input_dim=1, output_dim=info['target_channels'],
+        info['nmix'] =  (2*info['nr_logistic_mix']+info['nr_logistic_mix'])*info['num_output_chans']
+        info['output_dim']  = info['nmix']
+        # last layer for pcnn
+        info['last_layer_bias'] = 0.0
+    if info['rec_loss_type'] == 'bce':
+        # last layer for pcnn
+        info['last_layer_bias'] = 0.5
+        info['output_dim']  = info['num_output_chans']
+
+
+    pcnn_decoder = GatedPixelCNN(input_dim=info['num_input_chans'],
+                                 output_dim=info['output_dim'],
                                  dim=info['pixel_cnn_dim'],
                                  n_layers=info['num_pcnn_layers'],
                                  float_condition_size=info['code_length'],
@@ -91,7 +118,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
     if args.model_loadpath !='':
        for name,model in model_dict.items():
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
-    return model_dict, info, train_cnt, epoch_cnt
+    return model_dict, data_dict, info, train_cnt, epoch_cnt
 
 
 def run_acn(train_cnt, model_dict, data_dict, phase, device):
@@ -135,12 +162,16 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
         if idx == num_batches-2:
             # store example near end for plotting
             if info['rec_loss_type'] == 'dml':
-                yhat_batch = sample_from_discretized_mix_logistic(yhat_batch, info['nr_logistic_mix'])
-            example_images = rescale_inv(yhat_batch)
-            example_targets = rescale_inv(target)
-            example = {'data':data, 'target':example_targets, 'yhat':example_images}
+                yhat_batch = sample_from_discretized_mix_logistic(yhat_batch.detach(), info['nr_logistic_mix'])
+            example_images = info['rescale_inv'](yhat_batch)
+            example_targets = info['rescale_inv'](target)
+            example = {'data':data.detach().cpu(), 'target':example_targets.detach().cpu(), 'yhat':example_images.detach().cpu()}
+        if not idx % 10:
+            loss_avg = {'kl':kl_running/run, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
+            print(idx, loss_avg)
+
     # store average loss for return
-    loss_avg = {'kl':kl_running/bs, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
+    loss_avg = {'kl':kl_running/run, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
     print("finished %s after %s secs at cnt %s"%(phase,
                                                 time.time()-st,
                                                 train_cnt,
@@ -201,7 +232,9 @@ def latent_walk(model_dict, data_dict, info):
     with torch.no_grad():
         for walki in range(10):
             for idx, (data, label, batch_idx) in enumerate(data_loader):
-                target = data = data.to(info['device'])
+                # limit number of samples
+                lim = min([data.shape[0], 10])
+                target = data = data[:lim].to(info['device'])
                 z, u_q, s_q = model_dict['encoder_model'](data)
                 break
             _,c,h,w=target.shape
@@ -286,8 +319,8 @@ def sample(model_dict, data_dict, info):
             data_loader = data_dict[phase]
             with torch.no_grad():
                 for idx, (data, label, batch_idx) in enumerate(data_loader):
-                    target = data = data.to(info['device'])
-                    bs = data.shape[0]
+                    bs = min([data.shape[0], 10])
+                    target = data = data[:bs].to(info['device'])
                     z, u_q, s_q = model_dict['encoder_model'](data)
                     # teacher forced version
                     yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
@@ -341,7 +374,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=394)
     parser.add_argument('--num_threads', default=2)
     parser.add_argument('-se', '--save_every_epochs', default=5, type=int)
-    parser.add_argument('-bs', '--batch_size', default=128, type=int)
+    parser.add_argument('-bs', '--batch_size', default=84, type=int)
     parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
@@ -379,34 +412,17 @@ if __name__ == '__main__':
     parser.add_argument('-ed', '--end_label', default=5, type=int, help='end latent walk image from label')
     parser.add_argument('-nw', '--num_walk_steps', default=30, type=int, help='number of steps in latent space between start and end image')
     args = parser.parse_args()
-
-
+    # note - when reloading model, this will use the seed given in args - not
+    # the original random seed
     seed_everything(args.seed, args.num_threads)
     # get naming scheme
     args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type
     base_filepath = os.path.join(args.model_savedir, args.exp_name)
 
-    if args.rec_loss_type == 'bce':
-        # make binary data
-        rescale = lambda x: torch.round(x)
-        # no undoing this binary transform
-        rescale_inv = lambda x: x
-        args.last_layer_bias = 0.5
-    if args.rec_loss_type == 'dml':
-        # data going into dml should be bt -1 and 1
-        rescale = lambda x: (x - 0.5) * 2.
-        rescale_inv = lambda x: (0.5 * x) + 0.5
-        args.last_layer_bias = 0.0
-    dataset_transforms = transforms.Compose([transforms.ToTensor(), rescale])
-    data_dict, size_training_set, nchans, hsize, wsize = create_mnist_datasets(dataset_name=args.dataset_name, base_datadir=args.base_datadir, batch_size=args.batch_size, dataset_transforms=dataset_transforms)
-    info = create_new_info_dict(vars(args), size_training_set, base_filepath)
-    model_dict, info, train_cnt, epoch_cnt = create_conv_acn_pcnn_models(info, args.model_loadpath)
+    info = create_new_info_dict(vars(args), base_filepath)
+    model_dict, data_dict, info, train_cnt, epoch_cnt = create_conv_acn_pcnn_models(info, args.model_loadpath)
     if args.tsne:
         call_tsne_plot(model_dict, data_dict, info)
-    if args.sample or args.walk:
-        # limit the batch size when sampling/walk for reasonable memory use on cpu
-        args.batch_size = min([args.batch_size, 10])
-        data_dict, size_training_set, nchans, hsize, wsize = create_mnist_datasets(dataset_name=args.dataset_name, base_datadir=args.base_datadir, batch_size=args.batch_size)
     if args.sample:
         # limit batch size
         sample(model_dict, data_dict, info)

@@ -117,12 +117,12 @@ class GatedPixelCNN(nn.Module):
                  last_layer_bias=0.0, hsize=28, wsize=28):
         super(GatedPixelCNN, self).__init__()
         ''' output_dim is the size of the output channels
-            dim
-            ---- not sure about possible_values
+            dim is related to number of dimensions of the pixel cnn
         '''
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.dim = dim
+        assert dim > 6
         self.n_layers = n_layers
         self.n_classes = n_classes
         self.spatial_condition_size = spatial_condition_size
@@ -135,7 +135,6 @@ class GatedPixelCNN(nn.Module):
                                          nn.ReLU(True),
                                          nn.Conv2d(self.dim, self.dim, 1)
                                          )
-
 
         # build pixelcnn layers - functions like normal python list, but modules are registered
         self.layers = nn.ModuleList()
