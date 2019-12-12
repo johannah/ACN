@@ -91,7 +91,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath=''):
 
 def run_acn(train_cnt, model_dict, data_dict, phase, device):
     st = time.time()
-    rec_running = kl_running = sum_running = 0.0
+    run = rec_running = kl_running = sum_running = 0.0
     data_loader = data_dict[phase]
     model_dict = set_model_mode(model_dict, phase)
     for idx, (data, label, batch_index) in enumerate(data_loader):
@@ -108,26 +108,23 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
         kl = info['kl_beta']*kl.view(bs*info['code_length']).sum(dim=-1).mean()
         rec_loss = F.binary_cross_entropy(yhat_batch, target, reduction='none')
         rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
-        sum_loss = F.binary_cross_entropy(yhat_batch, target, reduction='sum')
         loss = kl+rec_loss
         if phase == 'train':
             loss.backward()
             model_dict['opt'].step()
+        run+=bs
         kl_running+= kl.item()
         rec_running+= rec_loss.item()
-        sum_running+= sum_loss.item()
         # add batch size because it hasn't been added to train cnt yet
         if phase == 'train':
             train_cnt+=bs
     example = {'data':data, 'target':target, 'yhat':yhat_batch}
-    kl_avg = kl_running/bs
-    rec_avg = rec_running/bs
-    sum_avg = sum_running/bs
-    loss_avg = {'kl':kl_avg, 'rec':rec_avg, 'sum':sum_avg}
-    print("finished %s after %s secs at cnt %s rec %s kl %s"%(phase,
-                                                              time.time()-st,
-                                                              train_cnt,
-                                                              rec_avg, kl_avg))
+    loss_avg = {'kl':kl_running/bs, 'rec':rec_running/run, 'loss':(rec_running+kl_running)/run}
+    print("finished %s after %s secs at cnt %s"%(phase,
+                                                time.time()-st,
+                                                train_cnt,
+                                                ))
+    print(loss_avg)
     return model_dict, data_dict, loss_avg, example
 
 def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info):
@@ -264,7 +261,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_threads', default=2)
     parser.add_argument('-se', '--save_every_epochs', default=5, type=int)
     parser.add_argument('-bs', '--batch_size', default=128, type=int)
-    parser.add_argument('-lr', '--learning_rate', default=1e-4)
+    parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
@@ -272,7 +269,7 @@ if __name__ == '__main__':
     # acn model setup
     parser.add_argument('-cl', '--code_length', default=64, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
-    parser.add_argument('-kl', '--kl_beta', default=.2, type=float, help='scale kl loss')
+    parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--possible_values', default=1, help='num values that the pcnn output can take')
     parser.add_argument('--last_layer_bias', default=0.5, help='bias for output decoder')
     parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
