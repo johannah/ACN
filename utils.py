@@ -49,9 +49,9 @@ def create_mnist_datasets(dataset_name, base_datadir, batch_size, dataset_transf
     data_dict = {'train':train_loader, 'valid':valid_loader}
     nchans,hsize,wsize = data_dict['train'].dataset[0][0].shape
     size_training_set = len(train_data)
-    return data_dict, size_training_set, nchans, hsize, wsize
+    return data_dict, size_training_set, nchans, nchans, hsize, wsize
 
-def create_new_info_dict(arg_dict, size_training_set, base_filepath):
+def create_new_info_dict(arg_dict, base_filepath):
     if not os.path.exists(base_filepath):
         os.makedirs(base_filepath)
     info = {'train_cnts':[],
@@ -62,7 +62,6 @@ def create_new_info_dict(arg_dict, size_training_set, base_filepath):
             'last_save':0,
             'last_plot':0,
             'epoch_cnt':0,
-            'size_training_set':size_training_set,
             'base_filepath':base_filepath,
              }
     for arg,val in arg_dict.items():
