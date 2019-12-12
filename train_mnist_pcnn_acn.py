@@ -51,13 +51,13 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     # setup loss-specific parameters for data
     if info['rec_loss_type'] == 'dml':
         # data going into dml should be bt -1 and 1
-        info['rescale'] = lambda x: (x - 0.5) * 2.
-        info['rescale_inv'] = lambda x: (0.5 * x) + 0.5
+        rescale = lambda x: (x - 0.5) * 2.
+        rescale_inv = lambda x: (0.5 * x) + 0.5
     if info['rec_loss_type'] == 'bce':
         # make binary data
-        info['rescale'] = lambda x: torch.round(x)
+        rescale = lambda x: torch.round(x)
         # no undoing this binary transform
-        info['rescale_inv'] = lambda x: x
+        rescale_inv = lambda x: x
 
     # load model if given a path
     if model_loadpath !='':
@@ -72,7 +72,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
         info['args'].append(largs)
 
     # transform is dependent on loss type
-    dataset_transforms = transforms.Compose([transforms.ToTensor(), info['rescale']])
+    dataset_transforms = transforms.Compose([transforms.ToTensor(), rescale])
     data_output = create_mnist_datasets(dataset_name=info['dataset_name'],
                                                      base_datadir=info['base_datadir'],
                                                      batch_size=info['batch_size'],
@@ -118,7 +118,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     if args.model_loadpath !='':
        for name,model in model_dict.items():
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
-    return model_dict, data_dict, info, train_cnt, epoch_cnt
+    return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 
 def run_acn(train_cnt, model_dict, data_dict, phase, device):
@@ -163,9 +163,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
             # store example near end for plotting
             if info['rec_loss_type'] == 'dml':
                 yhat_batch = sample_from_discretized_mix_logistic(yhat_batch.detach(), info['nr_logistic_mix'])
-            example_images = info['rescale_inv'](yhat_batch)
-            example_targets = info['rescale_inv'](target)
-            example = {'data':data.detach().cpu(), 'target':example_targets.detach().cpu(), 'yhat':example_images.detach().cpu()}
+            example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
             loss_avg = {'kl':kl_running/run, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
             print(idx, loss_avg)
@@ -179,7 +177,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
     print(loss_avg)
     return model_dict, data_dict, loss_avg, example
 
-def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info):
+def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
     print('starting training routine')
     base_filepath = info['base_filepath']
     base_filename = os.path.split(info['base_filepath'])[1]
@@ -213,6 +211,8 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info):
             valid_img_filepath = os.path.join(base_filepath, "%s_%010d_valid_rec.png"%(base_filename, train_cnt))
             plot_filepath = os.path.join(base_filepath, "%s_%010dloss.png"%(base_filename, train_cnt))
 
+            train_example['target'] = rescale_inv(train_example['target'])
+            train_example['yhat'] = rescale_inv(train_example['yhat'])
             plot_example(train_img_filepath, train_example, num_plot=5)
             plot_example(valid_img_filepath, valid_example, num_plot=5)
             save_checkpoint(state_dict, filename=ckpt_filepath)
@@ -420,7 +420,7 @@ if __name__ == '__main__':
     base_filepath = os.path.join(args.model_savedir, args.exp_name)
 
     info = create_new_info_dict(vars(args), base_filepath)
-    model_dict, data_dict, info, train_cnt, epoch_cnt = create_conv_acn_pcnn_models(info, args.model_loadpath)
+    model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_conv_acn_pcnn_models(info, args.model_loadpath)
     if args.tsne:
         call_tsne_plot(model_dict, data_dict, info)
     if args.sample:
@@ -430,5 +430,5 @@ if __name__ == '__main__':
         latent_walk(model_dict, data_dict, info)
     # only train if we weren't asked to do anything else
     if not max([args.sample, args.tsne, args.walk]):
-        train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info)
+        train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv)
 
