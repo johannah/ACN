@@ -122,7 +122,6 @@ class GatedPixelCNN(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.dim = dim
-        assert dim > 6
         self.n_layers = n_layers
         self.n_classes = n_classes
         self.spatial_condition_size = spatial_condition_size
@@ -130,6 +129,7 @@ class GatedPixelCNN(nn.Module):
         self.last_layer_bias = last_layer_bias
         self.hsize = hsize
         self.wsize = wsize
+        # must be one by one conv so as not to leak info
         self.input_conv = nn.Sequential(
                                          nn.Conv2d(self.input_dim, self.dim, 1),
                                          nn.ReLU(True),

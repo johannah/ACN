@@ -47,18 +47,6 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
                      'base_filepath', 'model_loadpath', 'perplexity',
                      'use_pred']
     largs = info['args']
-
-    # setup loss-specific parameters for data
-    if info['rec_loss_type'] == 'dml':
-        # data going into dml should be bt -1 and 1
-        rescale = lambda x: (x - 0.5) * 2.
-        rescale_inv = lambda x: (0.5 * x) + 0.5
-    if info['rec_loss_type'] == 'bce':
-        # make binary data
-        rescale = lambda x: torch.round(x)
-        # no undoing this binary transform
-        rescale_inv = lambda x: x
-
     # load model if given a path
     if model_loadpath !='':
         _dict = torch.load(model_loadpath, map_location=lambda storage, loc:storage)
@@ -70,6 +58,16 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
         train_cnt = info['train_cnts'][-1]
         epoch_cnt = info['epoch_cnt']
         info['args'].append(largs)
+
+    # setup loss-specific parameters for data
+    if info['rec_loss_type'] == 'dml':
+        # data going into dml should be bt -1 and 1
+        rescale = lambda x: (x - 0.5) * 2.
+        rescale_inv = lambda x: (0.5 * x) + 0.5
+    if info['rec_loss_type'] == 'bce':
+        rescale = lambda x: x
+        rescale_inv = lambda x: x
+
 
     # transform is dependent on loss type
     dataset_transforms = transforms.Compose([transforms.ToTensor(), rescale])
@@ -101,7 +99,6 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
         info['last_layer_bias'] = 0.5
         info['output_dim']  = info['num_output_chans']
 
-
     pcnn_decoder = GatedPixelCNN(input_dim=info['num_input_chans'],
                                  output_dim=info['output_dim'],
                                  dim=info['pixel_cnn_dim'],
@@ -121,7 +118,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 
-def run_acn(train_cnt, model_dict, data_dict, phase, device):
+def run_acn(train_cnt, model_dict, data_dict, phase, device, kl_beta, rec_loss_type):
     st = time.time()
     run = rec_running = kl_running = loss_running = 0.0
     data_loader = data_dict[phase]
@@ -139,12 +136,13 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
         u_p, s_p = model_dict['prior_model'](u_q)
         # calculate loss
         kl = kl_loss_function(u_q, s_q, u_p, s_p)
-        kl = info['kl_beta']*kl.view(bs*info['code_length']).sum(dim=-1).mean()
+        code_length = z.shape[1]
+        kl = kl_beta*kl.view(bs*code_length).sum(dim=-1).mean()
         yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
-        if info['rec_loss_type']  == 'bce':
+        if rec_loss_type  == 'bce':
             rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction='none')
             rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
-        if info['rec_loss_type'] == 'dml':
+        if rec_loss_type == 'dml':
             # TODO - what normalization is needed here
             # input into dml should be bt -1 and 1
             rec_loss = discretized_mix_logistic_loss(yhat_batch, target)
@@ -161,8 +159,6 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device):
             train_cnt+=bs
         if idx == num_batches-2:
             # store example near end for plotting
-            if info['rec_loss_type'] == 'dml':
-                yhat_batch = sample_from_discretized_mix_logistic(yhat_batch.detach(), info['nr_logistic_mix'])
             example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
             loss_avg = {'kl':kl_running/run, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
@@ -183,13 +179,25 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
     base_filename = os.path.split(info['base_filepath'])[1]
     while train_cnt < info['num_examples_to_train']:
         print('starting epoch %s on %s'%(epoch_cnt, info['device']))
-        model_dict, data_dict, train_loss_avg, train_example = run_acn(train_cnt, model_dict, data_dict, phase='train', device=info['device'])
+        model_dict, data_dict, train_loss_avg, train_example = run_acn(train_cnt,
+                                                                       model_dict,
+                                                                       data_dict,
+                                                                       phase='train',
+                                                                       device=info['device'],
+                                                                       kl_beta=info['kl_beta'],
+                                                                       rec_loss_type=info['rec_loss_type'])
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
         if not epoch_cnt % info['save_every_epochs']:
             # make a checkpoint
             print('starting valid phase')
-            model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt, model_dict, data_dict, phase='valid', device=info['device'])
+            model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt,
+                                                                           model_dict,
+                                                                           data_dict,
+                                                                           phase='valid',
+                                                                           device=info['device'],
+                                                                           kl_beta=info['kl_beta'],
+                                                                           rec_loss_type=info['rec_loss_type'])
             for loss_key in valid_loss_avg.keys():
                 for lphase in ['train_losses', 'valid_losses']:
                     if loss_key not in info[lphase].keys():
@@ -211,6 +219,10 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
             valid_img_filepath = os.path.join(base_filepath, "%s_%010d_valid_rec.png"%(base_filename, train_cnt))
             plot_filepath = os.path.join(base_filepath, "%s_%010dloss.png"%(base_filename, train_cnt))
 
+
+            if info['rec_loss_type'] == 'dml':
+                train_example['yhat'] = sample_from_discretized_mix_logistic(train_example['yhat'], info['nr_logistic_mix'])
+                valid_example['yhat'] = sample_from_discretized_mix_logistic(valid_example['yhat'], info['nr_logistic_mix'])
             train_example['target'] = rescale_inv(train_example['target'])
             train_example['yhat'] = rescale_inv(train_example['yhat'])
             plot_example(train_img_filepath, train_example, num_plot=5)
@@ -254,9 +266,12 @@ def latent_walk(model_dict, data_dict, info):
                 for j in range(canvas.shape[2]):
                     print('sampling row: %s'%j)
                     for k in range(canvas.shape[3]):
-                        output = torch.sigmoid(model_dict['pcnn_decoder'](x=canvas, float_condition=latents))
-                        canvas[:,i,j,k] = output[:,i,j,k].detach()
-                        # add frames for video
+                        output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
+                        if info['rec_loss_type'] == 'bce':
+                            #canvas[:,i,j,k] = torch.round(torch.sigmoid(output[:,i,j,k].detach()))
+                            canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
+                        if info['rec_loss_type'] == 'dml':
+                            canvas[:,i,j,k] = output[:,i,j,k].detach()
             npst = target[si:si+1].detach().cpu().numpy()
             npen = target[ei:ei+1].detach().cpu().numpy()
             npwalk = output.detach().cpu().numpy()
@@ -323,7 +338,15 @@ def sample(model_dict, data_dict, info):
                     target = data = data[:bs].to(info['device'])
                     z, u_q, s_q = model_dict['encoder_model'](data)
                     # teacher forced version
-                    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
+                    print('data', data.min(), data.max())
+                    print('target', target.min(), target.max())
+                    if info['rec_loss_type'] == 'bce':
+                        yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
+                        print('tf bce', yhat_batch.min(), yhat_batch.max())
+                    if info['rec_loss_type'] == 'dml':
+                        yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z)
+                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch, info['nr_logistic_mix'])
+                        print('tf dml', yhat_batch.min(), yhat_batch.max())
                     # create blank canvas for autoregressive sampling
                     canvas = torch.zeros_like(target)
                     building_canvas = []
@@ -331,15 +354,19 @@ def sample(model_dict, data_dict, info):
                         for j in range(canvas.shape[2]):
                             print('sampling row: %s'%j)
                             for k in range(canvas.shape[3]):
-                                output = torch.sigmoid(model_dict['pcnn_decoder'](x=canvas, float_condition=z))
-                                canvas[:,i,j,k] = output[:,i,j,k].detach()
+                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
+                                if info['rec_loss_type'] == 'bce':
+                                    canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
+                                if info['rec_loss_type'] == 'dml':
+                                    # TODO this isnt done yet
+                                    canvas[:,i,j,k] = output[:,i,j,k].detach()
                                 # add frames for video
                                 if not k%5:
                                     building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
 
                     f,ax = plt.subplots(bs, 3, sharex=True, sharey=True, figsize=(3,bs))
-                    nptarget = target.detach().cpu().numpy()
-                    npoutput = output.detach().cpu().numpy()
+                    nptarget = data.detach().cpu().numpy()
+                    npoutput = canvas.detach().cpu().numpy()
                     npyhat = yhat_batch.detach().cpu().numpy()
                     for idx in range(bs):
                         ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.viridis)
@@ -390,7 +417,7 @@ if __name__ == '__main__':
     parser.add_argument('-cl', '--code_length', default=64, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
     parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
-    parser.add_argument('--pixel_cnn_dim', default=64, help='TODO')
+    parser.add_argument('--pixel_cnn_dim', default=64, type=int, help='pixel cnn dimension')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
     parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
