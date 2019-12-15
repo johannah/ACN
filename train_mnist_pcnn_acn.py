@@ -225,8 +225,8 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                 valid_example['yhat'] = sample_from_discretized_mix_logistic(valid_example['yhat'], info['nr_logistic_mix'])
             train_example['target'] = rescale_inv(train_example['target'])
             train_example['yhat'] = rescale_inv(train_example['yhat'])
-            plot_example(train_img_filepath, train_example, num_plot=5)
-            plot_example(valid_img_filepath, valid_example, num_plot=5)
+            plot_example(train_img_filepath, train_example, num_plot=10)
+            plot_example(valid_img_filepath, valid_example, num_plot=10)
             save_checkpoint(state_dict, filename=ckpt_filepath)
 
             plot_losses(info['train_cnts'],
@@ -344,9 +344,8 @@ def sample(model_dict, data_dict, info):
                         yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
                         print('tf bce', yhat_batch.min(), yhat_batch.max())
                     if info['rec_loss_type'] == 'dml':
-                        yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch, info['nr_logistic_mix'])
-                        print('tf dml', yhat_batch.min(), yhat_batch.max())
+                        yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
+                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
                     # create blank canvas for autoregressive sampling
                     canvas = torch.zeros_like(target)
                     building_canvas = []
@@ -358,8 +357,9 @@ def sample(model_dict, data_dict, info):
                                 if info['rec_loss_type'] == 'bce':
                                     canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
                                 if info['rec_loss_type'] == 'dml':
-                                    # TODO this isnt done yet
-                                    canvas[:,i,j,k] = output[:,i,j,k].detach()
+                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
+                                    # output should be bt -1 and 1 for canvas
+                                    canvas[:,i,j,k] = output[:,i,j,k]
                                 # add frames for video
                                 if not k%5:
                                     building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
