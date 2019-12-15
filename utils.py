@@ -102,21 +102,22 @@ def rolling_average(a, n=5) :
     return ret[n - 1:] / n
 
 def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', rolling_length=4):
-    f,ax=plt.subplots(1,1,figsize=(4,6))
+    nf = len(train_losses.keys())
+    f,ax=plt.subplots(1,nf,figsize=(nf,3))
     cmap = matplotlib.cm.get_cmap('viridis')
     color_idxs = np.linspace(.1,.9,num=len(train_losses.keys()))
     colors = np.array([cmap(ci) for ci in color_idxs])
     for idx, key in enumerate(sorted(train_losses.keys())):
-        ax.plot(rolling_average(train_cnts, rolling_length),
+        ax[idx].plot(rolling_average(train_cnts, rolling_length),
                 rolling_average(train_losses[key], rolling_length),
                 lw=1, c=colors[idx])
-        ax.plot(rolling_average(train_cnts, rolling_length),
+        ax[idx].plot(rolling_average(train_cnts, rolling_length),
                 rolling_average(test_losses[key], rolling_length),
                 lw=1, c=colors[idx])
-        ax.scatter(rolling_average(train_cnts, rolling_length),
+        ax[idx].scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(train_losses[key], rolling_length),
                 s=10, c=tuple(colors[idx][None]), marker='x', label='test %s'%key)
-        ax.scatter(rolling_average(train_cnts, rolling_length),
+        ax[idx].scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(test_losses[key], rolling_length),
                 s=10, c=tuple(colors[idx][None]), marker='o', label='train %s'%key)
     ax.legend()
@@ -281,7 +282,6 @@ def sample_from_discretized_mix_logistic(l, nr_mix, only_mean=True, deterministi
     **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
     l should be bt -1 and 1
     """
-    print(l.min(), l.max())
     # Pytorch ordering
     l = l.permute(0, 2, 3, 1)
     ls = [int(y) for y in l.size()]
