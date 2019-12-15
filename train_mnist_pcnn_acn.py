@@ -139,6 +139,8 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, kl_beta, rec_loss_t
         code_length = z.shape[1]
         kl = kl_beta*kl.view(bs*code_length).sum(dim=-1).mean()
         yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
+        data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
+        yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
         if rec_loss_type  == 'bce':
             rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction='none')
             rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
@@ -407,6 +409,7 @@ if __name__ == '__main__':
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
     parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
+    parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
     # right now, still using float input for bce (which seemes to work) --
     # should actually convert data to binary...
     # if discretized mixture of logistics, we can predict pixel values. shape

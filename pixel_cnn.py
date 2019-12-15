@@ -61,6 +61,7 @@ class GatedMaskedConv2d(nn.Module):
         # kernel_size 1 are "fixup layers" to make things match up
         self.horiz_resid = nn.Conv2d(dim, dim, kernel_size=1, stride=1)
         self.gate = GatedActivation()
+        self.batch_norm = nn.BatchNorm2d(dim)
 
     def make_causal(self):
         self.vert_stack.weight.data[:,:,-1].zero_() # mask final row
@@ -109,6 +110,8 @@ class GatedMaskedConv2d(nn.Module):
             out_h = self.horiz_resid(gate_h)+x_h
         else:
             out_h = self.horiz_resid(gate_h)
+        out_h = self.batch_norm(out_h)
+        out_v = self.batch_norm(out_v)
         return out_v, out_h
 
 class GatedPixelCNN(nn.Module):
