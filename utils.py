@@ -76,7 +76,7 @@ def seed_everything(seed=394, max_threads=2):
     torch.manual_seed(394)
     torch.set_num_threads(max_threads)
 
-def plot_example(img_filepath, example, plot_on=['target', 'yhat'], num_plot=10):
+def plot_example(img_filepath, example, plot_on=['data', 'target', 'yhat'], num_plot=10):
     '''
     img_filepath: location to write .png file
     example: dict with torch images of the same shape [bs,c,h,w] to write
@@ -109,18 +109,16 @@ def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', 
     for idx, key in enumerate(sorted(train_losses.keys())):
         ax.plot(rolling_average(train_cnts, rolling_length),
                 rolling_average(train_losses[key], rolling_length),
-                label='train %s'%key, lw=1,
-                c=colors[idx])
+                lw=1, c=colors[idx])
         ax.plot(rolling_average(train_cnts, rolling_length),
                 rolling_average(test_losses[key], rolling_length),
-                label='test %s'%key, lw=1,
-                c=colors[idx])
+                lw=1, c=colors[idx])
         ax.scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(train_losses[key], rolling_length),
-                s=10, c=tuple(colors[idx][None]), marker='x')
+                s=10, c=tuple(colors[idx][None]), marker='x', label='test %s'%key)
         ax.scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(test_losses[key], rolling_length),
-                s=10, c=tuple(colors[idx][None]), marker='o')
+                s=10, c=tuple(colors[idx][None]), marker='o', label='train %s'%key)
     ax.legend()
     plt.savefig(name)
     plt.close()
