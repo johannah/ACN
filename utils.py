@@ -116,11 +116,12 @@ def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', 
                 lw=1, c=colors[idx])
         ax[idx].scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(train_losses[key], rolling_length),
-                s=10, c=tuple(colors[idx][None]), marker='x', label='test %s'%key)
+                s=15, c=tuple(colors[idx][None]), marker='x', label='test')
         ax[idx].scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(test_losses[key], rolling_length),
-                s=10, c=tuple(colors[idx][None]), marker='o', label='train %s'%key)
-    ax.legend()
+                s=15, c=tuple(colors[idx][None]), marker='o', label='train')
+        ax[idx].set_title(key)
+        ax[idx].legend()
     plt.savefig(name)
     plt.close()
 
