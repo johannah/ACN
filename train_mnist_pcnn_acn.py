@@ -361,6 +361,7 @@ def sample(model_dict, data_dict, info):
                                 if info['rec_loss_type'] == 'dml':
                                     output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
                                     # output should be bt -1 and 1 for canvas
+                                    #print(output[:,i,j,k].min(), output[:,i,j,k].max())
                                     canvas[:,i,j,k] = output[:,i,j,k]
                                 # add frames for video
                                 if not k%5:
