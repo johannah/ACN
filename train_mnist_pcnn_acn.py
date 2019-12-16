@@ -121,7 +121,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 
-def run_acn(train_cnt, model_dict, data_dict, phase, device, kl_beta, rec_loss_type):
+def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
     st = time.time()
     run = rec_running = kl_running = loss_running = 0.0
     data_loader = data_dict[phase]
@@ -132,6 +132,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, kl_beta, rec_loss_t
         bs,c,h,w = target.shape
         model_dict['opt'].zero_grad()
         z, u_q, s_q = model_dict['encoder_model'](data)
+        code_length = z.shape[1]
         if phase == 'train':
             # fit knn during training
             model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
@@ -139,10 +140,11 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, kl_beta, rec_loss_t
         u_p, s_p = model_dict['prior_model'](u_q)
         # calculate loss
         kl = kl_loss_function(u_q, s_q, u_p, s_p)
-        code_length = z.shape[1]
-        kl = kl_beta*kl.view(bs*code_length).sum(dim=-1).mean()
+        kl = kl.view(bs*code_length).sum(dim=-1).mean()
+        # scale kl cost by size of data
+        kl *= code_length / float(c * h * w)
         yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
-        data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
+        data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
         yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
         if rec_loss_type  == 'bce':
             rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction='none')
@@ -166,7 +168,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, kl_beta, rec_loss_t
             # store example near end for plotting
             example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
-            loss_avg = {'kl':kl_running/run, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
+            loss_avg = {'kl':kl_running/run, rec_loss_type:rec_running/run, 'loss':loss_running/run}
             print(idx, loss_avg)
 
     # store average loss for return
@@ -189,8 +191,8 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                                                                        data_dict,
                                                                        phase='train',
                                                                        device=info['device'],
-                                                                       kl_beta=info['kl_beta'],
-                                                                       rec_loss_type=info['rec_loss_type'])
+                                                                       rec_loss_type=info['rec_loss_type'],
+                                                                       dropout_rate=info['dropout_rate'])
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
         if not epoch_cnt % info['save_every_epochs']:
@@ -201,8 +203,8 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                                                                            data_dict,
                                                                            phase='valid',
                                                                            device=info['device'],
-                                                                           kl_beta=info['kl_beta'],
-                                                                           rec_loss_type=info['rec_loss_type'])
+                                                                           rec_loss_type=info['rec_loss_type'],
+                                                                           dropout_rate=info['dropout_rate'])
             for loss_key in valid_loss_avg.keys():
                 for lphase in ['train_losses', 'valid_losses']:
                     if loss_key not in info[lphase].keys():
@@ -441,7 +443,7 @@ if __name__ == '__main__':
     # acn model setup
     parser.add_argument('-cl', '--code_length', default=64, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
-    parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
+    #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--pixel_cnn_dim', default=64, type=int, help='pixel cnn dimension')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
