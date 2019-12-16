@@ -97,6 +97,11 @@ def plot_example(img_filepath, example, plot_on=['data', 'target', 'yhat'], num_
     save_image(comparison.cpu(), img_filepath, nrow=num_plot)
     print('writing comparison image: %s img_path'%img_filepath)
 
+def count_parameters(model):
+    # https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
+    num =  sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return num
+
 def rolling_average(a, n=5) :
     if n == 0:
         return a
