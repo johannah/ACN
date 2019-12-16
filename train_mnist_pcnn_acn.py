@@ -497,7 +497,7 @@ if __name__ == '__main__':
             do='_do%s'%args.dropout_rate
         else:
             do=''
-        pl = '_'+args.pixel_cnn_dim
+        pl = '_%s'%args.pixel_cnn_dim
         args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+bn+do+pl
         base_filepath = os.path.join(args.model_savedir, args.exp_name)
     print('base filepath is %s'%base_filepath)
