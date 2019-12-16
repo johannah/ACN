@@ -317,7 +317,17 @@ def call_tsne_plot(model_dict, data_dict, info):
                 # yhat_batch is bt 0-1
                 z, u_q, s_q = model_dict['encoder_model'](data)
                 u_p, s_p = model_dict['prior_model'](u_q)
-                yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
+                if info['rec_loss_type'] == 'bce':
+                    assert target.max() <=1
+                    assert target.min() >=0
+                    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
+                elif info['rec_loss_type'] == 'dml':
+                    assert target.max() <=1
+                    assert target.min() >=-1
+                    yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
+                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
+                else:
+                    raise ValueError('invalid rec_loss_type')
                 X = u_q.cpu().numpy()
                 if info['use_pred']:
                     images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
@@ -456,7 +466,6 @@ if __name__ == '__main__':
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # sampling info
     parser.add_argument('-s', '--sample', action='store_true', default=False)
-    parser.add_argument('-tf', '--teacher_force', action='store_true', default=False)
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=3, type=int, help='perplexity used in scikit-learn tsne call')
