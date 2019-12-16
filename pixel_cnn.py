@@ -45,7 +45,10 @@ class GatedMaskedConv2d(nn.Module):
         if self.n_classes is not None:
             self.class_condition_embedding = nn.Embedding(self.n_classes, 2*self.dim)
         if self.float_condition_size is not None:
-            self.float_condition_layer = nn.Linear(self.float_condition_size, 2*self.dim*self.hsize*self.wsize)
+            # below where we make 2*self.dim*self.hsize*self.wsize is wrong -
+            # basically only trains with dim=1 --> 'linear residual connections'
+            #self.float_condition_layer = nn.Linear(self.float_condition_size, 2*self.dim*self.hsize*self.wsize)
+            self.float_condition_layer = nn.Linear(self.float_condition_size, 2*self.dim)
         if self.spatial_condition_size is not None:
             cond_kernel_shape = (kernel, kernel)
             cond_padding_shape = (kernel//2, kernel//2)
@@ -91,16 +94,18 @@ class GatedMaskedConv2d(nn.Module):
 
         if float_condition is not None:
             float_out = self.float_condition_layer(float_condition)
-            float_out = float_out.view(-1,2*self.dim,self.hsize,self.wsize)
-            input_to_out_v += float_out[:,:,:,:]
-            input_to_out_h += float_out[:,:,:,:]
-
+            # below is wrong - only train with dim=1
+            #float_out = float_out.view(-1,2*self.dim,self.hsize,self.wsize)
+            #input_to_out_v += float_out[:,:,:,:]
+            #input_to_out_h += float_out[:,:,:,:]
+            float_out = float_out.view(-1,2*self.dim)
+            input_to_out_v += float_out[:,:,None,None]
+            input_to_out_h += float_out[:,:,None,None]
         # add class conditioning
         if class_condition is not None:
             class_condition = self.class_condition_embedding(class_condition)
             input_to_out_v += class_condition[:,:,None,None]
             input_to_out_h += class_condition[:,:,None,None]
-
         if spatial_condition is not None:
             spatial_c_e = self.spatial_condition_stack(spatial_condition)
             input_to_out_v += spatial_c_e
