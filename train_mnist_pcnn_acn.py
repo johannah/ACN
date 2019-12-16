@@ -27,7 +27,7 @@ from torchvision import transforms
 
 from utils import create_new_info_dict, save_checkpoint, create_mnist_datasets, seed_everything
 from utils import plot_example, plot_losses
-from utils import set_model_mode, kl_loss_function
+from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
@@ -104,7 +104,8 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
                                  dim=info['pixel_cnn_dim'],
                                  n_layers=info['num_pcnn_layers'],
                                  float_condition_size=info['code_length'],
-                                 last_layer_bias=info['last_layer_bias']).to(info['device'])
+                                 last_layer_bias=info['last_layer_bias'],
+                                 use_batch_norm=info['use_batch_norm']).to(info['device'])
 
     model_dict = {'encoder_model':encoder_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder}
     parameters = []
@@ -115,6 +116,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     if args.model_loadpath !='':
        for name,model in model_dict.items():
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
+    write_log_files(info)
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 
@@ -367,16 +369,17 @@ def sample(model_dict, data_dict, info):
                                 if not k%5:
                                     building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
 
+                    print('canvas', canvas.min(), canvas.max())
                     f,ax = plt.subplots(bs, 3, sharex=True, sharey=True, figsize=(3,bs))
                     nptarget = data.detach().cpu().numpy()
                     npoutput = canvas.detach().cpu().numpy()
                     npyhat = yhat_batch.detach().cpu().numpy()
                     for idx in range(bs):
-                        ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.viridis)
+                        ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.gray)
                         ax[idx,0].set_title('true')
-                        ax[idx,1].imshow(npyhat[idx,0], cmap=plt.cm.viridis)
+                        ax[idx,1].imshow(npyhat[idx,0], cmap=plt.cm.gray)
                         ax[idx,1].set_title('tf')
-                        ax[idx,2].imshow(npoutput[idx,0], cmap=plt.cm.viridis)
+                        ax[idx,2].imshow(npoutput[idx,0], cmap=plt.cm.gray)
                         ax[idx,2].set_title('sam')
                         ax[idx,0].axis('off')
                         ax[idx,1].axis('off')
@@ -411,6 +414,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
     parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
+    parser.add_argument('-bn', '--use_batch_norm', default=False, action='store_true')
     # right now, still using float input for bce (which seemes to work) --
     # should actually convert data to binary...
     # if discretized mixture of logistics, we can predict pixel values. shape

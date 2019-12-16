@@ -24,11 +24,12 @@ class GatedActivation(nn.Module):
 class GatedMaskedConv2d(nn.Module):
     def __init__(self, mask_type, dim, kernel, residual=True,
                  n_classes=None, spatial_condition_size=None, float_condition_size=None,
-                 hsize=28, wsize=28):
+                 hsize=28, wsize=28, use_batch_norm=False):
         super(GatedMaskedConv2d, self).__init__()
         # ("Kernel size must be odd")
         self.mask_type = mask_type
         self.residual = residual
+        self.use_batch_norm = use_batch_norm
         # unique for every layer of the pixelcnn - takes integer from 0-x and
         # returns slice which is 0 to 1ish - treat each latent value like a
         # "word" embedding
@@ -112,14 +113,15 @@ class GatedMaskedConv2d(nn.Module):
             out_h = self.horiz_resid(gate_h)+x_h
         else:
             out_h = self.horiz_resid(gate_h)
-        out_h = self.batch_norm_h(out_h)
-        out_v = self.batch_norm_v(out_v)
+        if self.use_batch_norm:
+            out_h = self.batch_norm_h(out_h)
+            out_v = self.batch_norm_v(out_v)
         return out_v, out_h
 
 class GatedPixelCNN(nn.Module):
     def __init__(self, input_dim=1, output_dim=1, dim=256, n_layers=15, n_classes=None,
                  spatial_condition_size=None, float_condition_size=None,
-                 last_layer_bias=0.0, hsize=28, wsize=28):
+                 last_layer_bias=0.0, hsize=28, wsize=28, use_batch_norm=False):
         super(GatedPixelCNN, self).__init__()
         ''' output_dim is the size of the output channels
             dim is related to number of dimensions of the pixel cnn
@@ -134,6 +136,7 @@ class GatedPixelCNN(nn.Module):
         self.last_layer_bias = last_layer_bias
         self.hsize = hsize
         self.wsize = wsize
+        self.use_batch_norm = use_batch_norm
         # must be one by one conv so as not to leak info
         self.input_conv = nn.Sequential(
                                          nn.Conv2d(self.input_dim, self.dim, 1),
@@ -155,7 +158,7 @@ class GatedPixelCNN(nn.Module):
                            kernel=3, residual=True, n_classes=n_classes,
                            spatial_condition_size=self.spatial_condition_size,
                            float_condition_size=self.float_condition_size,
-                           hsize=self.hsize, wsize=self.wsize))
+                           hsize=self.hsize, wsize=self.wsize, use_batch_norm=self.use_batch_norm))
 
         self.output_conv = nn.Sequential(
                                          nn.Conv2d(self.dim, 512, 1),
