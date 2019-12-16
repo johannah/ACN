@@ -121,7 +121,8 @@ class GatedMaskedConv2d(nn.Module):
 class GatedPixelCNN(nn.Module):
     def __init__(self, input_dim=1, output_dim=1, dim=256, n_layers=15, n_classes=None,
                  spatial_condition_size=None, float_condition_size=None,
-                 last_layer_bias=0.0, hsize=28, wsize=28, use_batch_norm=False):
+                 last_layer_bias=0.0, hsize=28, wsize=28, use_batch_norm=False,
+                 output_projection_size=512):
         super(GatedPixelCNN, self).__init__()
         ''' output_dim is the size of the output channels
             dim is related to number of dimensions of the pixel cnn
@@ -137,6 +138,8 @@ class GatedPixelCNN(nn.Module):
         self.hsize = hsize
         self.wsize = wsize
         self.use_batch_norm = use_batch_norm
+        # output projection_size should be smaller than 512 - around 16 or so
+        self.output_projection_size = output_projection_size
         # must be one by one conv so as not to leak info
         self.input_conv = nn.Sequential(
                                          nn.Conv2d(self.input_dim, self.dim, 1),
@@ -161,9 +164,9 @@ class GatedPixelCNN(nn.Module):
                            hsize=self.hsize, wsize=self.wsize, use_batch_norm=self.use_batch_norm))
 
         self.output_conv = nn.Sequential(
-                                         nn.Conv2d(self.dim, 512, 1),
+                                         nn.Conv2d(self.dim, self.output_projection_size, 1),
                                          nn.ReLU(True),
-                                         nn.Conv2d(512, self.output_dim, 1)
+                                         nn.Conv2d(self.output_projection_size, self.output_dim, 1)
                                          )
 
         # in pytorch - apply(fn)  recursively applies fn to every submodule as returned by .children
