@@ -105,7 +105,8 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
                                  n_layers=info['num_pcnn_layers'],
                                  float_condition_size=info['code_length'],
                                  last_layer_bias=info['last_layer_bias'],
-                                 use_batch_norm=info['use_batch_norm']).to(info['device'])
+                                 use_batch_norm=info['dont_use_batch_norm'],
+                                 output_projection_size=info['output_projection_size']).to(info['device'])
 
     model_dict = {'encoder_model':encoder_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder}
     parameters = []
@@ -345,35 +346,42 @@ def sample(model_dict, data_dict, info):
                     print('data', data.min(), data.max())
                     print('target', target.min(), target.max())
                     if info['rec_loss_type'] == 'bce':
+                        assert target.max() <=1
+                        assert target.min() >=0
                         yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
-                        print('tf bce', yhat_batch.min(), yhat_batch.max())
-                    if info['rec_loss_type'] == 'dml':
+                    elif info['rec_loss_type'] == 'dml':
+                        assert target.max() <=1
+                        assert target.min() >=-1
                         yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
                         yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
+                    else:
+                        raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
                     canvas = torch.zeros_like(target)
                     building_canvas = []
-                    for i in range(canvas.shape[1]):
-                        for j in range(canvas.shape[2]):
-                            print('sampling row: %s'%j)
-                            for k in range(canvas.shape[3]):
-                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
-                                if info['rec_loss_type'] == 'bce':
-                                    canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
-                                if info['rec_loss_type'] == 'dml':
-                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
-                                    # output should be bt -1 and 1 for canvas
-                                    #print(output[:,i,j,k].min(), output[:,i,j,k].max())
-                                    canvas[:,i,j,k] = output[:,i,j,k]
-                                # add frames for video
-                                if not k%5:
-                                    building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
+                    #for i in range(canvas.shape[1]):
+                    #    for j in range(canvas.shape[2]):
+                    #        print('sampling row: %s'%j)
+                    #        for k in range(canvas.shape[3]):
+                    #            output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
+                    #            if info['rec_loss_type'] == 'bce':
+                    #                # output should be bt 0 and 1 for canvas
+                    #                canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
+                    #            if info['rec_loss_type'] == 'dml':
+                    #                output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
+                    #                # output should be bt -1 and 1 for canvas
+                    #                #print(output[:,i,j,k].min(), output[:,i,j,k].max())
+                    #                canvas[:,i,j,k] = output[:,i,j,k]
+                    #            # add frames for video
+                    #            if not k%5:
+                    #                building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
 
                     print('canvas', canvas.min(), canvas.max())
+                    print('yhat_batch', yhat_batch.min(), yhat_batch.max())
                     f,ax = plt.subplots(bs, 3, sharex=True, sharey=True, figsize=(3,bs))
                     nptarget = data.detach().cpu().numpy()
-                    npoutput = canvas.detach().cpu().numpy()
                     npyhat = yhat_batch.detach().cpu().numpy()
+                    npoutput = canvas.detach().cpu().numpy()
                     for idx in range(bs):
                         ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.gray)
                         ax[idx,0].set_title('true')
@@ -389,13 +397,13 @@ def sample(model_dict, data_dict, info):
                     plt.savefig(iname)
                     plt.close()
 
-                    # make movie
-                    building_canvas = (np.array(building_canvas)*255).astype(np.uint8)
-                    print('writing building movie')
-                    mname = output_savepath + '_build_%s.mp4'%phase
-                    vwrite(mname, building_canvas)
-                    print('finished %s'%mname)
-                    # only do one batch
+                    ## make movie
+                    #building_canvas = (np.array(building_canvas)*255).astype(np.uint8)
+                    #print('writing building movie')
+                    #mname = output_savepath + '_build_%s.mp4'%phase
+                    #vwrite(mname, building_canvas)
+                    #print('finished %s'%mname)
+                    ## only do one batch
                     break
 
 if __name__ == '__main__':
@@ -414,7 +422,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
     parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
-    parser.add_argument('-bn', '--use_batch_norm', default=False, action='store_true')
+    parser.add_argument('--dont_use_batch_norm', default=True, action='store_false')
+    parser.add_argument('--output_projection_size', default=32, type=int)
     # right now, still using float input for bce (which seemes to work) --
     # should actually convert data to binary...
     # if discretized mixture of logistics, we can predict pixel values. shape
