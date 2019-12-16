@@ -489,7 +489,16 @@ if __name__ == '__main__':
         base_filepath = os.path.split(args.model_loadpath)[0]
     else:
         # create new base_filepath
-        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type
+        if args.dont_use_batch_norm:
+            bn = ''
+        else:
+            bn = '_bn'
+        if args.dropout_rate > 0:
+            do='_do%s'%args.dropout_rate
+        else:
+            do=''
+        pl = '_'+args.pixel_cnn_dim
+        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+bn+do+pl
         base_filepath = os.path.join(args.model_savedir, args.exp_name)
     print('base filepath is %s'%base_filepath)
 
