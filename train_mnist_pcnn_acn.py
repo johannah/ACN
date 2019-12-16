@@ -27,7 +27,7 @@ from torchvision.utils import save_image
 from torchvision import transforms
 
 from utils import create_new_info_dict, save_checkpoint, create_mnist_datasets, seed_everything
-from utils import plot_example, plot_losses
+from utils import plot_example, plot_losses, count_parameters
 from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
@@ -113,6 +113,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
+        print('created %s model with %s parameters' %(name,count_parameters(model)))
     model_dict['opt'] = optim.Adam(parameters, lr=info['learning_rate'])
 
     if args.model_loadpath !='':
