@@ -490,9 +490,9 @@ if __name__ == '__main__':
     else:
         # create new base_filepath
         if args.dont_use_batch_norm:
-            bn = ''
-        else:
             bn = '_bn'
+        else:
+            bn = ''
         if args.dropout_rate > 0:
             do='_do%s'%args.dropout_rate
         else:
