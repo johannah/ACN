@@ -348,12 +348,16 @@ def sample(model_dict, data_dict, info):
                     if info['rec_loss_type'] == 'bce':
                         assert target.max() <=1
                         assert target.min() >=0
+                        vmin = 0
+                        vmax = 1
                         yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
                     elif info['rec_loss_type'] == 'dml':
                         assert target.max() <=1
                         assert target.min() >=-1
                         yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
                         yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
+                        vmin = -1
+                        vmax = 1
                     else:
                         raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
@@ -383,11 +387,14 @@ def sample(model_dict, data_dict, info):
                     npyhat = yhat_batch.detach().cpu().numpy()
                     npoutput = canvas.detach().cpu().numpy()
                     for idx in range(bs):
-                        ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.gray)
+                        ax[idx,0].matshow(nptarget[idx,0], cmap=plt.cm.gray)
+                        ax[idx,1].matshow(npyhat[idx,0]  , cmap=plt.cm.gray)
+                        ax[idx,2].matshow(npoutput[idx,0], cmap=plt.cm.gray)
+                        #ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
+                        #ax[idx,1].imshow(npyhat[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
+                        #ax[idx,2].imshow(npoutput[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
                         ax[idx,0].set_title('true')
-                        ax[idx,1].imshow(npyhat[idx,0], cmap=plt.cm.gray)
                         ax[idx,1].set_title('tf')
-                        ax[idx,2].imshow(npoutput[idx,0], cmap=plt.cm.gray)
                         ax[idx,2].set_title('sam')
                         ax[idx,0].axis('off')
                         ax[idx,1].axis('off')
