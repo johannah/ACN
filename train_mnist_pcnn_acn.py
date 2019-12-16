@@ -469,7 +469,7 @@ if __name__ == '__main__':
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=3, type=int, help='perplexity used in scikit-learn tsne call')
-    parser.add_argument('-ut', '--use_pred', default=True, action='store_true',  help='plot tsne with pred image instead of target')
+    parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
     # walk-thru
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
     parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
