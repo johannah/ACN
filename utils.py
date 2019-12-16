@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import os
 import sys
 import numpy as np
+from glob import glob
+from shutil import copyfile
 
 import torch
 from torch.nn import functional as F
@@ -87,6 +89,7 @@ def plot_example(img_filepath, example, plot_on=['data', 'target', 'yhat'], num_
         bs,c,h,w = example[pon].shape
         num_plot = min([bs, num_plot])
         eimgs = example[pon].view(bs,c,h,w)[:num_plot]
+        print('plotting', pon, eimgs.min(), eimgs.max())
         if not cnt:
             comparison = eimgs
         else:
@@ -101,9 +104,24 @@ def rolling_average(a, n=5) :
     ret[n:] = ret[n:] - ret[:-n]
     return ret[n - 1:] / n
 
+def write_log_files(info):
+    basename = os.path.split(info['base_filepath'])[1]
+    info_filepath = os.path.join(info['base_filepath'],"%s_info.txt"%(basename))
+    fp = open(info_filepath, 'w')
+    for key, item in info.items():
+        if 'loss' or 'cnt' not in key:
+            fp.write("%s:%s"%(key,item))
+    fp.close()
+    files = glob(os.path.join(os.path.split(__file__)[0],'*.py'))
+    for f in files:
+        fname = os.path.split(f)[1]
+        to_path = os.path.join(info['base_filepath'], fname)
+        copyfile(f, to_path)
+    print('making backup of py files to %s'%info['base_filepath'])
+
 def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', rolling_length=4):
     nf = len(train_losses.keys())
-    f,ax=plt.subplots(1,nf,figsize=(nf,3))
+    f,ax=plt.subplots(1,nf,figsize=(nf*2,5))
     cmap = matplotlib.cm.get_cmap('viridis')
     color_idxs = np.linspace(.1,.9,num=len(train_losses.keys()))
     colors = np.array([cmap(ci) for ci in color_idxs])
@@ -116,10 +134,10 @@ def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', 
                 lw=1, c=colors[idx])
         ax[idx].scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(train_losses[key], rolling_length),
-                s=15, c=tuple(colors[idx][None]), marker='x', label='test')
+                s=15, c=tuple(colors[idx][None]), marker='x', label='train')
         ax[idx].scatter(rolling_average(train_cnts, rolling_length),
                rolling_average(test_losses[key], rolling_length),
-                s=15, c=tuple(colors[idx][None]), marker='o', label='train')
+                s=15, c=tuple(colors[idx][None]), marker='o', label='valid')
         ax[idx].set_title(key)
         ax[idx].legend()
     plt.savefig(name)
