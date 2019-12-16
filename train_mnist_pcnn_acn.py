@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import os
 import sys
 import time
+from glob import glob
 import numpy as np
 from copy import deepcopy, copy
 from torch import nn, optim
@@ -358,22 +359,22 @@ def sample(model_dict, data_dict, info):
                     # create blank canvas for autoregressive sampling
                     canvas = torch.zeros_like(target)
                     building_canvas = []
-                    #for i in range(canvas.shape[1]):
-                    #    for j in range(canvas.shape[2]):
-                    #        print('sampling row: %s'%j)
-                    #        for k in range(canvas.shape[3]):
-                    #            output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
-                    #            if info['rec_loss_type'] == 'bce':
-                    #                # output should be bt 0 and 1 for canvas
-                    #                canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
-                    #            if info['rec_loss_type'] == 'dml':
-                    #                output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
-                    #                # output should be bt -1 and 1 for canvas
-                    #                #print(output[:,i,j,k].min(), output[:,i,j,k].max())
-                    #                canvas[:,i,j,k] = output[:,i,j,k]
-                    #            # add frames for video
-                    #            if not k%5:
-                    #                building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
+                    for i in range(canvas.shape[1]):
+                        for j in range(canvas.shape[2]):
+                            print('sampling row: %s'%j)
+                            for k in range(canvas.shape[3]):
+                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
+                                if info['rec_loss_type'] == 'bce':
+                                    # output should be bt 0 and 1 for canvas
+                                    canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
+                                if info['rec_loss_type'] == 'dml':
+                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
+                                    # output should be bt -1 and 1 for canvas
+                                    #print(output[:,i,j,k].min(), output[:,i,j,k].max())
+                                    canvas[:,i,j,k] = output[:,i,j,k]
+                                # add frames for video
+                                if not k%5:
+                                    building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
 
                     print('canvas', canvas.min(), canvas.max())
                     print('yhat_batch', yhat_batch.min(), yhat_batch.max())
@@ -410,6 +411,7 @@ if __name__ == '__main__':
     parser = ArgumentParser(description='train acn')
     # operatation options
     parser.add_argument('-l', '--model_loadpath', default='', help='load model to resume training or sample')
+    parser.add_argument('-ll', '--load_last_model', default='',  help='load last model from directory from directory')
     parser.add_argument('-c', '--cuda', action='store_true', default=False)
     parser.add_argument('--seed', default=394)
     parser.add_argument('--num_threads', default=2)
@@ -459,8 +461,17 @@ if __name__ == '__main__':
     # the original random seed
     seed_everything(args.seed, args.num_threads)
     # get naming scheme
-    args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type
-    base_filepath = os.path.join(args.model_savedir, args.exp_name)
+    # in this case model loadpath is just the directory of the model we want
+    # to load
+    if args.load_last_model != '':
+        base_filepath = args.load_last_model
+        args.model_loadpath = sorted(glob(os.path.join(base_filepath, '*.pt')))[-1]
+    elif args.model_loadpath != '':
+        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type
+        base_filepath = os.path.join(args.model_savedir, args.exp_name)
+    else:
+        base_filepath = os.path.split(args.model_loadpath)[0]
+    print('base filepath is %s'%base_filepath)
 
     info = create_new_info_dict(vars(args), base_filepath)
     model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_conv_acn_pcnn_models(info, args.model_loadpath)
