@@ -131,7 +131,12 @@ class GatedPixelCNN(nn.Module):
         super(GatedPixelCNN, self).__init__()
         ''' output_dim is the size of the output channels
             dim is related to number of dimensions of the pixel cnn
+
         '''
+        if use_batch_norm:
+            print('using batch norm')
+        else:
+            print('not using batch norm')
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.dim = dim
