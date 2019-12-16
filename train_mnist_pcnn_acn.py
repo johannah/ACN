@@ -471,16 +471,17 @@ if __name__ == '__main__':
     # the original random seed
     seed_everything(args.seed, args.num_threads)
     # get naming scheme
-    # in this case model loadpath is just the directory of the model we want
-    # to load
     if args.load_last_model != '':
+        # load last model from this dir
         base_filepath = args.load_last_model
         args.model_loadpath = sorted(glob(os.path.join(base_filepath, '*.pt')))[-1]
     elif args.model_loadpath != '':
+        # use full path to model
+        base_filepath = os.path.split(args.model_loadpath)[0]
+    else:
+        # create new base_filepath
         args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type
         base_filepath = os.path.join(args.model_savedir, args.exp_name)
-    else:
-        base_filepath = os.path.split(args.model_loadpath)[0]
     print('base filepath is %s'%base_filepath)
 
     info = create_new_info_dict(vars(args), base_filepath)
