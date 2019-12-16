@@ -117,7 +117,6 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     if args.model_loadpath !='':
        for name,model in model_dict.items():
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
-    write_log_files(info)
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 
@@ -474,5 +473,6 @@ if __name__ == '__main__':
         latent_walk(model_dict, data_dict, info)
     # only train if we weren't asked to do anything else
     if not max([args.sample, args.tsne, args.walk]):
+        write_log_files(info)
         train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv)
 

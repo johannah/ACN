@@ -113,11 +113,12 @@ def write_log_files(info):
             fp.write("%s:%s"%(key,item))
     fp.close()
     files = glob(os.path.join(os.path.split(__file__)[0],'*.py'))
+    print('making backup of py files')
     for f in files:
         fname = os.path.split(f)[1]
         to_path = os.path.join(info['base_filepath'], fname)
         copyfile(f, to_path)
-    print('making backup of py files to %s'%info['base_filepath'])
+        print(f, to_path)
 
 def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', rolling_length=4):
     nf = len(train_losses.keys())
