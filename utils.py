@@ -110,13 +110,15 @@ def write_log_files(info):
     fp = open(info_filepath, 'w')
     for key, item in info.items():
         if 'loss' or 'cnt' not in key:
-            fp.write("%s:%s"%(key,item))
+            fp.write("%s:%s\n"%(key,item))
     fp.close()
     files = glob(os.path.join(os.path.split(__file__)[0],'*.py'))
     print('making backup of py files')
+    bdir = os.path.join(info['base_filepath'], 'py')
+    if not os.path.exists(bdir): os.makedirs(bdir)
     for f in files:
         fname = os.path.split(f)[1]
-        to_path = os.path.join(info['base_filepath'], fname)
+        to_path = os.path.join(bdir, fname)
         copyfile(f, to_path)
         print(f, to_path)
 
