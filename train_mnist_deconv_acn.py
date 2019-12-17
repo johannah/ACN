@@ -32,7 +32,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import ConvEncoder, PriorNetwork
+from acn_models import ConvEncoder, PriorNetwork, ConvDecoder
 from IPython import embed
 
 
@@ -100,16 +100,13 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
         info['last_layer_bias'] = 0.5
         info['output_dim']  = info['num_output_chans']
 
-    pcnn_decoder = GatedPixelCNN(input_dim=info['num_input_chans'],
-                                 output_dim=info['output_dim'],
-                                 dim=info['pixel_cnn_dim'],
-                                 n_layers=info['num_pcnn_layers'],
-                                 float_condition_size=info['code_length'],
-                                 last_layer_bias=info['last_layer_bias'],
-                                 use_batch_norm=info['use_batch_norm'],
-                                 output_projection_size=info['output_projection_size']).to(info['device'])
+    conv_decoder = ConvDecoder(code_len=info['code_length'],
+                               output_size=info['output_dim'],
+                               encoder_output_size=info['encoder_output_size'],
+                               last_layer_bias=info['last_layer_bias'],
+                               ).to(info['device'])
 
-    model_dict = {'encoder_model':encoder_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder}
+    model_dict = {'encoder_model':encoder_model, 'prior_model':prior_model, 'conv_decoder':conv_decoder}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -132,7 +129,11 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         target = data = data.to(device)
         bs,c,h,w = target.shape
         model_dict['opt'].zero_grad()
+        # dropout on input is different than what I've done in the pcnn_acn
+        # model - there I only did dropout on the pcnn_decoder tf
+        data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
         z, u_q, s_q = model_dict['encoder_model'](data)
+        yhat_batch = model_dict['conv_decoder'](z)
         code_length = z.shape[1]
         if phase == 'train':
             # fit knn during training
@@ -144,8 +145,6 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         kl = kl.view(bs*code_length).sum(dim=-1).mean()
         # scale kl cost by size of data
         kl *= code_length / float(c * h * w)
-        data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
-        yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
         if rec_loss_type  == 'bce':
             rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction='none')
             rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
@@ -226,7 +225,6 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
             valid_img_filepath = os.path.join(base_filepath, "%s_%010d_valid_rec.png"%(base_filename, train_cnt))
             plot_filepath = os.path.join(base_filepath, "%s_%010dloss.png"%(base_filename, train_cnt))
 
-
             if info['rec_loss_type'] == 'dml':
                 train_example['yhat'] = sample_from_discretized_mix_logistic(train_example['yhat'], info['nr_logistic_mix'])
                 valid_example['yhat'] = sample_from_discretized_mix_logistic(valid_example['yhat'], info['nr_logistic_mix'])
@@ -267,18 +265,7 @@ def latent_walk(model_dict, data_dict, info):
                 code_walk = torch.linspace(s,e,bs)
                 latents[:,code_idx] = code_walk
             latents = latents.to(info['device'])
-            ## create blank canvas for autoregressive sampling
-            canvas = torch.zeros((bs,c,h,w))
-            for i in range(canvas.shape[1]):
-                for j in range(canvas.shape[2]):
-                    print('sampling row: %s'%j)
-                    for k in range(canvas.shape[3]):
-                        output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
-                        if info['rec_loss_type'] == 'bce':
-                            #canvas[:,i,j,k] = torch.round(torch.sigmoid(output[:,i,j,k].detach()))
-                            canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
-                        if info['rec_loss_type'] == 'dml':
-                            canvas[:,i,j,k] = output[:,i,j,k].detach()
+            output = model_dict['conv_decoder'](latents)
             npst = target[si:si+1].detach().cpu().numpy()
             npen = target[ei:ei+1].detach().cpu().numpy()
             npwalk = output.detach().cpu().numpy()
@@ -316,15 +303,15 @@ def call_tsne_plot(model_dict, data_dict, info):
                 # yhat_batch is bt 0-1
                 z, u_q, s_q = model_dict['encoder_model'](data)
                 u_p, s_p = model_dict['prior_model'](u_q)
+                yhat_batch = model_dict['conv_decoder'](z)
                 if info['rec_loss_type'] == 'bce':
                     assert target.max() <=1
                     assert target.min() >=0
-                    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
+                    yhat_batch = torch.sigmoid(yhat_batch)
                 elif info['rec_loss_type'] == 'dml':
                     assert target.max() <=1
                     assert target.min() >=-1
-                    yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
+                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch, info['nr_logistic_mix'])
                 else:
                     raise ValueError('invalid rec_loss_type')
                 X = u_q.cpu().numpy()
@@ -342,89 +329,6 @@ def call_tsne_plot(model_dict, data_dict, info):
                           html_out_path=html_path, serve=False)
                 break
 
-def sample(model_dict, data_dict, info):
-    from skvideo.io import vwrite
-    model_dict = set_model_mode(model_dict, 'valid')
-    output_savepath = args.model_loadpath.replace('.pt', '')
-    with torch.no_grad():
-        for phase in ['train', 'valid']:
-            data_loader = data_dict[phase]
-            with torch.no_grad():
-                for idx, (data, label, batch_idx) in enumerate(data_loader):
-                    bs = min([data.shape[0], 10])
-                    target = data = data[:bs].to(info['device'])
-                    z, u_q, s_q = model_dict['encoder_model'](data)
-                    # teacher forced version
-                    print('data', data.min(), data.max())
-                    print('target', target.min(), target.max())
-                    if info['rec_loss_type'] == 'bce':
-                        assert target.max() <=1
-                        assert target.min() >=0
-                        vmin = 0
-                        vmax = 1
-                        yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
-                    elif info['rec_loss_type'] == 'dml':
-                        assert target.max() <=1
-                        assert target.min() >=-1
-                        yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
-                        vmin = -1
-                        vmax = 1
-                    else:
-                        raise ValueError('invalid rec_loss_type')
-                    # create blank canvas for autoregressive sampling
-                    canvas = torch.zeros_like(target)
-                    building_canvas = []
-                    for i in range(canvas.shape[1]):
-                        for j in range(canvas.shape[2]):
-                            print('sampling row: %s'%j)
-                            for k in range(canvas.shape[3]):
-                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
-                                if info['rec_loss_type'] == 'bce':
-                                    # output should be bt 0 and 1 for canvas
-                                    canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
-                                if info['rec_loss_type'] == 'dml':
-                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
-                                    # output should be bt -1 and 1 for canvas
-                                    #print(output[:,i,j,k].min(), output[:,i,j,k].max())
-                                    canvas[:,i,j,k] = output[:,i,j,k]
-                                # add frames for video
-                                if not k%5:
-                                    building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
-
-                    print('canvas', canvas.min(), canvas.max())
-                    print('yhat_batch', yhat_batch.min(), yhat_batch.max())
-                    f,ax = plt.subplots(bs, 3, sharex=True, sharey=True, figsize=(3,bs))
-                    nptarget = data.detach().cpu().numpy()
-                    npyhat = yhat_batch.detach().cpu().numpy()
-                    npoutput = canvas.detach().cpu().numpy()
-                    for idx in range(bs):
-                        ax[idx,0].matshow(nptarget[idx,0], cmap=plt.cm.gray)
-                        ax[idx,1].matshow(npyhat[idx,0]  , cmap=plt.cm.gray)
-                        ax[idx,2].matshow(npoutput[idx,0], cmap=plt.cm.gray)
-                        #ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
-                        #ax[idx,1].imshow(npyhat[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
-                        #ax[idx,2].imshow(npoutput[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
-                        ax[idx,0].set_title('true')
-                        ax[idx,1].set_title('tf')
-                        ax[idx,2].set_title('sam')
-                        ax[idx,0].axis('off')
-                        ax[idx,1].axis('off')
-                        ax[idx,2].axis('off')
-                    iname = output_savepath + '_sample_%s.png'%phase
-                    print('plotting %s'%iname)
-                    plt.savefig(iname)
-                    plt.close()
-
-                    ## make movie
-                    #building_canvas = (np.array(building_canvas)*255).astype(np.uint8)
-                    #print('writing building movie')
-                    #mname = output_savepath + '_build_%s.mp4'%phase
-                    #vwrite(mname, building_canvas)
-                    #print('finished %s'%mname)
-                    ## only do one batch
-                    break
-
 if __name__ == '__main__':
     from argparse import ArgumentParser
     parser = ArgumentParser(description='train acn')
@@ -440,9 +344,9 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
-    parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
-    parser.add_argument('--use_batch_norm', default=False, action='store_true')
+    parser.add_argument('-e', '--exp_name', default='deconv_acn', help='name of experiment')
+    parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
+    #parser.add_argument('--use_batch_norm', default=False, action='store_true')
     parser.add_argument('--output_projection_size', default=32, type=int)
     # right now, still using float input for bce (which seemes to work) --
     # should actually convert data to binary...
@@ -454,17 +358,12 @@ if __name__ == '__main__':
     parser.add_argument('-cl', '--code_length', default=64, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
-    parser.add_argument('--pixel_cnn_dim', default=64, type=int, help='pixel cnn dimension')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
-    parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
     parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
-    parser.add_argument('--num_pcnn_layers', default=8, help='num layers for pixel cnn')
     # dataset setup
     parser.add_argument('-d',  '--dataset_name', default='FashionMNIST', help='which mnist to use', choices=['MNIST', 'FashionMNIST'])
     parser.add_argument('--model_savedir', default='../model_savedir', help='save checkpoints here')
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
-    # sampling info
-    parser.add_argument('-s', '--sample', action='store_true', default=False)
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=3, type=int, help='perplexity used in scikit-learn tsne call')
@@ -488,16 +387,15 @@ if __name__ == '__main__':
         base_filepath = os.path.split(args.model_loadpath)[0]
     else:
         # create new base_filepath
-        if args.use_batch_norm:
-            bn = '_bn'
-        else:
-            bn = ''
+        #if args.use_batch_norm:
+        #    bn = '_bn'
+        #else:
+        #    bn = ''
         if args.dropout_rate > 0:
             do='_do%s'%args.dropout_rate
         else:
             do=''
-        pl = '_%s'%args.pixel_cnn_dim
-        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+bn+do+pl
+        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+do
         base_filepath = os.path.join(args.model_savedir, args.exp_name)
     print('base filepath is %s'%base_filepath)
 
@@ -505,13 +403,10 @@ if __name__ == '__main__':
     model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_conv_acn_pcnn_models(info, args.model_loadpath)
     if args.tsne:
         call_tsne_plot(model_dict, data_dict, info)
-    if args.sample:
-        # limit batch size
-        sample(model_dict, data_dict, info)
     if args.walk:
         latent_walk(model_dict, data_dict, info)
     # only train if we weren't asked to do anything else
-    if not max([args.sample, args.tsne, args.walk]):
+    if not max([args.tsne, args.walk]):
         write_log_files(info)
         train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv)
 

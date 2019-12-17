@@ -3,6 +3,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from torch import nn
 from torch.nn import functional as F
 import torch
+from IPython import embed
 
 class ConvEncoder(nn.Module):
     def __init__(self, code_len, input_size=1, encoder_output_size=1000):
@@ -57,6 +58,64 @@ class ConvEncoder(nn.Module):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
         return z, mu, logvar
+
+class ConvDecoder(nn.Module):
+    def __init__(self, code_len, output_size=1, encoder_output_size=1000, last_layer_bias=0.5):
+        super(ConvDecoder, self).__init__()
+
+        self.code_len = code_len
+        self.encoder_output_size = encoder_output_size
+        # find reshape to match encoder --> eo is 4 with mnist (28,28)  and
+        # code_len of 64
+        self.eo = np.sqrt(encoder_output_size/(2*code_len))
+        assert self.eo == int(self.eo)
+        self.eo = int(self.eo)
+        # architecture dependent
+        self.fc3 = nn.Linear(code_len, encoder_output_size)
+        self.decoder = nn.Sequential(
+                # 4x4
+                nn.ConvTranspose2d(in_channels=code_len*2,
+                       out_channels=32,
+                       kernel_size=1,
+                       stride=1, padding=0),
+                 nn.BatchNorm2d(32),
+                 nn.ReLU(True),
+                 # 4x4 -->  8x8
+                 nn.ConvTranspose2d(in_channels=32,
+                       out_channels=32,
+                       kernel_size=4,
+                       stride=2, padding=1),
+                 nn.BatchNorm2d(32),
+                 nn.ReLU(True),
+                 # 8>14
+                 nn.ConvTranspose2d(in_channels=32,
+                         out_channels=32,
+                         kernel_size=2,
+                         stride=2, padding=1),
+                 nn.BatchNorm2d(32),
+                 nn.ReLU(True),
+                 # 14->28
+                 nn.ConvTranspose2d(in_channels=32,
+                         out_channels=32,
+                         kernel_size=2,
+                         stride=2, padding=0),
+                 nn.BatchNorm2d(32),
+                 nn.ReLU(True),
+                )
+        self.out_layer = nn.ConvTranspose2d(in_channels=32,
+                         out_channels=output_size,
+                         kernel_size=1,
+                         stride=1, padding=0)
+
+        # set bias to 0.5 for sigmoid with bce - 0 when using dml
+        self.out_layer.bias.data.fill_(last_layer_bias)
+
+    def forward(self, z):
+        # z input size is (bs, code_len)
+        co = F.relu(self.fc3(z))
+        col = co.view(co.shape[0], self.code_len*2, self.eo, self.eo)
+        out = self.decoder(col)
+        return self.out_layer(out)
 
 class PriorNetwork(nn.Module):
     def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):
