@@ -268,6 +268,8 @@ def latent_walk(model_dict, data_dict, info):
             output = model_dict['conv_decoder'](latents)
             npst = target[si:si+1].detach().cpu().numpy()
             npen = target[ei:ei+1].detach().cpu().numpy()
+            if info['rec_loss_type'] == 'dml':
+                output = sample_from_discretized_mix_logistic(output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
             npwalk = output.detach().cpu().numpy()
             # add multiple frames of each sample as a hacky way to make the
             # video more interpretable to humans
@@ -373,7 +375,7 @@ if __name__ == '__main__':
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
     parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
     parser.add_argument('-ed', '--end_label', default=5, type=int, help='end latent walk image from label')
-    parser.add_argument('-nw', '--num_walk_steps', default=30, type=int, help='number of steps in latent space between start and end image')
+    parser.add_argument('-nw', '--num_walk_steps', default=40, type=int, help='number of steps in latent space between start and end image')
     args = parser.parse_args()
     # note - when reloading model, this will use the seed given in args - not
     # the original random seed

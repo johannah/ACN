@@ -281,6 +281,8 @@ def latent_walk(model_dict, data_dict, info):
                             canvas[:,i,j,k] = output[:,i,j,k].detach()
             npst = target[si:si+1].detach().cpu().numpy()
             npen = target[ei:ei+1].detach().cpu().numpy()
+            if info['rec_loss_type'] == 'dml':
+                output = sample_from_discretized_mix_logistic(output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
             npwalk = output.detach().cpu().numpy()
             # add multiple frames of each sample as a hacky way to make the
             # video more interpretable to humans
