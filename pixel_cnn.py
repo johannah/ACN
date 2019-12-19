@@ -26,7 +26,7 @@ class GatedMaskedConv2d(nn.Module):
                  n_classes=None, spatial_condition_size=None, float_condition_size=None,
                  hsize=28, wsize=28, use_batch_norm=False):
         super(GatedMaskedConv2d, self).__init__()
-        # ("Kernel size must be odd")
+        assert (kernel % 2 == 1 ), "Kernel size must be odd"
         self.mask_type = mask_type
         self.residual = residual
         self.use_batch_norm = use_batch_norm
@@ -41,7 +41,6 @@ class GatedMaskedConv2d(nn.Module):
         self.hsize = hsize
         self.wsize = wsize
         self.n_classes = n_classes
-        assert (kernel % 2 == 1 )
         if self.n_classes is not None:
             self.class_condition_embedding = nn.Embedding(self.n_classes, 2*self.dim)
         if self.float_condition_size is not None:
