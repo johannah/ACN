@@ -324,7 +324,7 @@ def call_tsne_plot(model_dict, data_dict, info):
                     assert target.max() <=1
                     assert target.min() >=-1
                     yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
+                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                 else:
                     raise ValueError('invalid rec_loss_type')
                 X = u_q.cpu().numpy()
@@ -367,7 +367,7 @@ def sample(model_dict, data_dict, info):
                         assert target.max() <=1
                         assert target.min() >=-1
                         yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
+                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                         vmin = -1
                         vmax = 1
                     else:
@@ -384,7 +384,7 @@ def sample(model_dict, data_dict, info):
                                     # output should be bt 0 and 1 for canvas
                                     canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
                                 if info['rec_loss_type'] == 'dml':
-                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
+                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
                                     # output should be bt -1 and 1 for canvas
                                     #print(output[:,i,j,k].min(), output[:,i,j,k].max())
                                     canvas[:,i,j,k] = output[:,i,j,k]
@@ -465,9 +465,10 @@ if __name__ == '__main__':
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # sampling info
     parser.add_argument('-s', '--sample', action='store_true', default=False)
+    parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
-    parser.add_argument('-p', '--perplexity', default=3, type=int, help='perplexity used in scikit-learn tsne call')
+    parser.add_argument('-p', '--perplexity', default=10, type=int, help='perplexity used in scikit-learn tsne call')
     parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
     # walk-thru
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')

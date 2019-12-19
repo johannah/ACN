@@ -248,7 +248,7 @@ def sample(model_dict, data_dict, info):
                         assert target.max() <=1
                         assert target.min() >=-1
                         yhat_batch_dml = model_dict['pcnn_decoder'](x=target, class_condition=label)
-                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'])
+                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                     else:
                         raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
@@ -263,7 +263,7 @@ def sample(model_dict, data_dict, info):
                                     # output should be bt 0 and 1 for canvas
                                     canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
                                 if info['rec_loss_type'] == 'dml':
-                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'])
+                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
                                     # output should be bt -1 and 1 for canvas
                                     #print(output[:,i,j,k].min(), output[:,i,j,k].max())
                                     canvas[:,i,j,k] = output[:,i,j,k]
@@ -342,6 +342,7 @@ if __name__ == '__main__':
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # sampling info
     parser.add_argument('-s', '--sample', action='store_true', default=False)
+    parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
     args = parser.parse_args()
     # note - when reloading model, this will use the seed given in args - not
     # the original random seed

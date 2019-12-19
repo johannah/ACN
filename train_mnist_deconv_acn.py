@@ -360,13 +360,14 @@ if __name__ == '__main__':
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
+    parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
     # dataset setup
     parser.add_argument('-d',  '--dataset_name', default='FashionMNIST', help='which mnist to use', choices=['MNIST', 'FashionMNIST'])
     parser.add_argument('--model_savedir', default='../model_savedir', help='save checkpoints here')
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
-    parser.add_argument('-p', '--perplexity', default=3, type=int, help='perplexity used in scikit-learn tsne call')
+    parser.add_argument('-p', '--perplexity', default=10, type=int, help='perplexity used in scikit-learn tsne call')
     parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
     # walk-thru
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
