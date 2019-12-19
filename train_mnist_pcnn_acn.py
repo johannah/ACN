@@ -143,7 +143,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         kl = kl_loss_function(u_q, s_q, u_p, s_p)
         kl = kl.view(bs*code_length).sum(dim=-1).mean()
         # scale kl cost by size of data
-        kl *= code_length / float(c * h * w)
+        #kl *= code_length / float(c * h * w)
         data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
         yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
         if rec_loss_type  == 'bce':
@@ -243,6 +243,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
 
 def latent_walk(model_dict, data_dict, info):
     from skvideo.io import vwrite
+    from imageio import imwrite
     model_dict = set_model_mode(model_dict, 'valid')
     output_savepath = args.model_loadpath.replace('.pt', '')
     phase = 'train'
@@ -273,36 +274,34 @@ def latent_walk(model_dict, data_dict, info):
                 for j in range(canvas.shape[2]):
                     print('sampling row: %s'%j)
                     for k in range(canvas.shape[3]):
-                        output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
+                        output = model_dict['pcnn_decoder'](x=canvas, float_condition=latents)
                         if info['rec_loss_type'] == 'bce':
-                            #canvas[:,i,j,k] = torch.round(torch.sigmoid(output[:,i,j,k].detach()))
                             canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
                         if info['rec_loss_type'] == 'dml':
-                            canvas[:,i,j,k] = output[:,i,j,k].detach()
+                            sample_dml = sample_from_discretized_mix_logistic(output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                            canvas[:,i,j,k] = sample_dml[:,i,j,k].detach()
             npst = target[si:si+1].detach().cpu().numpy()
             npen = target[ei:ei+1].detach().cpu().numpy()
-            if info['rec_loss_type'] == 'dml':
-                output = sample_from_discretized_mix_logistic(output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-            npwalk = output.detach().cpu().numpy()
+            npwalk = canvas.detach().cpu().numpy()
             # add multiple frames of each sample as a hacky way to make the
             # video more interpretable to humans
-            walk_video = np.concatenate((npst, npst,
-                                         npst, npst,
-                                         npst, npst))
+            walk_video = np.concatenate((npst))
+            walk_strip = npst[0,0]
             for ww in range(npwalk.shape[0]):
                 walk_video = np.concatenate((walk_video,
                                              npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
                                              ))
+                walk_strip = np.concatenate((walk_strip, npwalk[ww:ww+1,0]))
             walk_video = np.concatenate((walk_video,
-                                         npen, npen,
-                                         npen, npen,
-                                         npen, npen))
+                                         npen,
+                                         ))
+            walk_strip = np.concatenate((walk_strip, npen[0,0]))
             walk_video = (walk_video*255).astype(np.uint8)
+            mname = output_savepath + '%s_s%s_e%s_walk.mp4'%(walki,sl,el)
+            iname = output_savepath + '%s_s%s_e%s_walk_strip.png'%(walki,sl,el)
+            imwrite(iname, walk_strip)
             ## make movie
             print('writing walk movie')
-            mname = output_savepath + '%s_s%s_e%s_walk.mp4'%(walki,sl,el)
             vwrite(mname, walk_video)
             print('finished %s'%mname)
 
@@ -362,16 +361,12 @@ def sample(model_dict, data_dict, info):
                     if info['rec_loss_type'] == 'bce':
                         assert target.max() <=1
                         assert target.min() >=0
-                        vmin = 0
-                        vmax = 1
                         yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z))
                     elif info['rec_loss_type'] == 'dml':
                         assert target.max() <=1
                         assert target.min() >=-1
                         yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
                         yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                        vmin = -1
-                        vmax = 1
                     else:
                         raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
@@ -476,7 +471,7 @@ if __name__ == '__main__':
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
     parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
     parser.add_argument('-ed', '--end_label', default=5, type=int, help='end latent walk image from label')
-    parser.add_argument('-nw', '--num_walk_steps', default=30, type=int, help='number of steps in latent space between start and end image')
+    parser.add_argument('-nw', '--num_walk_steps', default=40, type=int, help='number of steps in latent space between start and end image')
     args = parser.parse_args()
     # note - when reloading model, this will use the seed given in args - not
     # the original random seed
