@@ -144,7 +144,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         kl = kl_loss_function(u_q, s_q, u_p, s_p)
         kl = kl.view(bs*code_length).sum(dim=-1).mean()
         # scale kl cost by size of data
-        kl *= code_length / float(c * h * w)
+        #kl *= code_length / float(c * h * w)
         if rec_loss_type  == 'bce':
             rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction='none')
             rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
