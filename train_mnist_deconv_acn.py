@@ -32,7 +32,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import ConvEncoder, PriorNetwork, ConvDecoder
+from acn_models import ConvEncoder, PriorNetwork, ConvEncodeDecode, ConvEncodeDecodeLarge
 from IPython import embed
 
 
@@ -84,8 +84,8 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     info['wsize'] = wsize
 
     # setup models
-    encoder_model = ConvEncoder(info['code_length'], input_size=info['input_channels'],
-                            encoder_output_size=info['encoder_output_size']).to(info['device'])
+    #encoder_model = ConvEncoder(info['code_length'], input_size=info['input_channels'],
+    #                        encoder_output_size=info['encoder_output_size']).to(info['device'])
     prior_model = PriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
     # pixel cnn architecture is dependent on loss
@@ -100,13 +100,21 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
         info['last_layer_bias'] = 0.5
         info['output_dim']  = info['num_output_chans']
 
-    conv_decoder = ConvDecoder(code_len=info['code_length'],
+    #conv_decoder = ConvDecoder(code_len=info['code_length'],
+    #                           output_size=info['output_dim'],
+    #                           encoder_output_size=info['encoder_output_size'],
+    #                           last_layer_bias=info['last_layer_bias'],
+    #                           ).to(info['device'])
+    conv_model = ConvEncodeDecodeLarge(code_len=info['code_length'],
+                               input_size=info['input_channels'],
                                output_size=info['output_dim'],
                                encoder_output_size=info['encoder_output_size'],
                                last_layer_bias=info['last_layer_bias'],
                                ).to(info['device'])
 
-    model_dict = {'encoder_model':encoder_model, 'prior_model':prior_model, 'conv_decoder':conv_decoder}
+
+    #model_dict = {'encoder_model':encoder_model, 'prior_model':prior_model, 'conv_decoder':conv_decoder}
+    model_dict = {'conv_model':conv_model, 'prior_model':prior_model}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -132,26 +140,25 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         # dropout on input is different than what I've done in the pcnn_acn
         # model - there I only did dropout on the pcnn_decoder tf
         data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
-        z, u_q, s_q = model_dict['encoder_model'](data)
-        yhat_batch = model_dict['conv_decoder'](z)
-        code_length = z.shape[1]
+        yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
+        #z, u_q, s_q = model_dict['encoder_model'](data)
+        #yhat_batch = model_dict['conv_decoder'](z)
         if phase == 'train':
             # fit knn during training
             model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
             model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
         u_p, s_p = model_dict['prior_model'](u_q)
         # calculate loss
-        kl = kl_loss_function(u_q, s_q, u_p, s_p)
-        kl = kl.view(bs*code_length).sum(dim=-1).mean()
+        kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
+        #kl = kl.view(bs*code_length).sum(dim=-1).mean()
         # scale kl cost by size of data
         #kl *= code_length / float(c * h * w)
         if rec_loss_type  == 'bce':
-            rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction='none')
-            rec_loss = rec_loss.view(bs,c*h*w).sum(dim=-1).mean()
+            # in  the sum-based loss model that runs - kl is .012 and bce is 2.2 at step 204k
+            rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction=info['reduction'])
         if rec_loss_type == 'dml':
-            # TODO - what normalization is needed here
             # input into dml should be bt -1 and 1
-            rec_loss = discretized_mix_logistic_loss(yhat_batch, target)
+            rec_loss = discretized_mix_logistic_loss(yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
         loss = kl+rec_loss
         if phase == 'train':
             loss.backward()
@@ -168,7 +175,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
             loss_avg = {'kl':kl_running/run, rec_loss_type:rec_running/run, 'loss':loss_running/run}
-            print(idx, loss_avg)
+            print(train_cnt, idx, loss_avg)
 
     # store average loss for return
     loss_avg = {'kl':kl_running/run, info['rec_loss_type']:rec_running/run, 'loss':loss_running/run}
@@ -303,9 +310,9 @@ def call_tsne_plot(model_dict, data_dict, info):
             for idx, (data, label, batch_idx) in enumerate(data_loader):
                 target = data = data.to(info['device'])
                 # yhat_batch is bt 0-1
-                z, u_q, s_q = model_dict['encoder_model'](data)
+                yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
                 u_p, s_p = model_dict['prior_model'](u_q)
-                yhat_batch = model_dict['conv_decoder'](z)
+                #yhat_batch = model_dict['conv_decoder'](z)
                 if info['rec_loss_type'] == 'bce':
                     assert target.max() <=1
                     assert target.min() >=0
@@ -346,8 +353,9 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='deconv_acn', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='deconv_acn_large_rewrite_sum', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
+    parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     #parser.add_argument('--use_batch_norm', default=False, action='store_true')
     parser.add_argument('--output_projection_size', default=32, type=int)
     # right now, still using float input for bce (which seemes to work) --
@@ -362,6 +370,7 @@ if __name__ == '__main__':
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
+    #parser.add_argument('--encoder_output_size', default=6272, help='output as a result of the flatten of the encoder - found experimentally')
     parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
     # dataset setup
     parser.add_argument('-d',  '--dataset_name', default='FashionMNIST', help='which mnist to use', choices=['MNIST', 'FashionMNIST'])
