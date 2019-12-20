@@ -78,13 +78,16 @@ def seed_everything(seed=394, max_threads=2):
     torch.manual_seed(394)
     torch.set_num_threads(max_threads)
 
-def plot_example(img_filepath, example, plot_on=['data', 'target', 'yhat'], num_plot=10):
+def plot_example(img_filepath, example, plot_on=[], num_plot=10):
     '''
     img_filepath: location to write .png file
     example: dict with torch images of the same shape [bs,c,h,w] to write
-    plot_on: list of keys of images in example dict to write
+    plot_on: list of keys of images in example dict to write - if blank, plot all keys in example
     num_plot: limit the number of examples from bs to this int
     '''
+    if not len(plot_on):
+        # plot all
+        plot_on = example.keys()
     for cnt, pon in enumerate(plot_on):
         bs,c,h,w = example[pon].shape
         num_plot = min([bs, num_plot])
