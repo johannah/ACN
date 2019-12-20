@@ -162,8 +162,8 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             # input into dml should be bt -1 and 1
             # pcnn starts at kl:6 dml:3017 with sum reduction on Fashion MNIST -
             # not sure if this model will train yet
-            deconv_rec_loss = discretized_mix_logistic_loss(deconv_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
-            pcnn_rec_loss = discretized_mix_logistic_loss(pcnn_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
+            deconv_rec_loss = discretized_mix_logistic_loss(deconv_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+            pcnn_rec_loss = discretized_mix_logistic_loss(pcnn_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
         loss = kl+deconv_rec_loss+pcnn_rec_loss
         if phase == 'train':
             loss.backward()
@@ -254,7 +254,8 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                 valid_example['deconv_yhat'] = sample_from_discretized_mix_logistic(valid_example['deconv_yhat'], info['nr_logistic_mix'])
 
             train_example['target'] = rescale_inv(train_example['target'])
-            train_example['yhat'] = rescale_inv(train_example['yhat'])
+            train_example['deconv_yhat'] = rescale_inv(train_example['deconv_yhat'])
+            train_example['pcnn_yhat'] = rescale_inv(train_example['pcnn_yhat'])
             plot_example(train_img_filepath, train_example, num_plot=10)
             plot_example(valid_img_filepath, valid_example, num_plot=10)
             save_checkpoint(state_dict, filename=ckpt_filepath)
