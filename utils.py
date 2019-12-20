@@ -208,7 +208,7 @@ def set_model_mode(model_dict, phase):
                 model_dict[name].train()
     return model_dict
 
-def kl_loss_function(u_q, s_q, u_p, s_p):
+def kl_loss_function(u_q, s_q, u_p, s_p, reduction='sum'):
     ''' reconstruction loss + coding cost
      coding cost is the KL divergence bt posterior and conditional prior
      Args:
@@ -221,9 +221,16 @@ def kl_loss_function(u_q, s_q, u_p, s_p):
      Returns: loss
      '''
     acn_KLD = (s_p-s_q-0.5 + ((2*s_q).exp() + (u_q-u_p).pow(2)) / (2*(2*s_p).exp()))
-    return acn_KLD
+    bs,code_length = u_q.shape
+    acn_KLD = acn_KLD.sum(dim=-1)
+    if reduction == 'sum':
+        return acn_KLD.sum()
+    elif reduction == 'mean':
+        return acn_KLD.mean()
+    else:
+        raise ValueError('invalid kl reduction')
 
-def discretized_mix_logistic_loss(prediction, target, nr_mix=10):
+def discretized_mix_logistic_loss(prediction, target, nr_mix=10, reduction='mean'):
     """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval
     Args:
         prediction: model prediction. channels of model prediction should be mean
@@ -231,6 +238,7 @@ def discretized_mix_logistic_loss(prediction, target, nr_mix=10):
         target: min/max should be -1 and 1
     **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
     """
+    chan = prediction.shape[1]
     #assert (prediction.max()<=1 and prediction.min()>=-1)
     assert (target.max()<=1 and target.min()>=-1)
     device = target.device
@@ -294,7 +302,13 @@ def discretized_mix_logistic_loss(prediction, target, nr_mix=10):
     log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
     log_probs        = torch.sum(log_probs, dim=3) + log_prob_from_logits(logit_probs)
     lse = log_sum_exp(log_probs)
-    return -lse.mean()
+    if reduction == 'mean':
+        dml_loss = -lse.mean()
+    elif reduction == 'sum':
+        dml_loss = -lse.sum()
+    else:
+        raise ValueError('reduction not known')
+    return dml_loss
 
 def to_one_hot(tensor, n, fill_with=1.):
     # we perform one hot encore with respect to the last axis

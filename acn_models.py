@@ -59,10 +59,9 @@ class ConvEncoder(nn.Module):
         z = self.reparameterize(mu, logvar)
         return z, mu, logvar
 
-class ConvDecoder(nn.Module):
-    def __init__(self, code_len, output_size=1, encoder_output_size=1000, last_layer_bias=0.5):
-        super(ConvDecoder, self).__init__()
-
+class ConvEncodeDecodeLarge(nn.Module):
+    def __init__(self, code_len, input_size=1, output_size=1, encoder_output_size=1000, last_layer_bias=0.5):
+        super(ConvEncodeDecodeLarge, self).__init__()
         self.code_len = code_len
         self.encoder_output_size = encoder_output_size
         # find reshape to match encoder --> eo is 4 with mnist (28,28)  and
@@ -70,39 +69,40 @@ class ConvDecoder(nn.Module):
         self.eo = np.sqrt(encoder_output_size/(2*code_len))
         assert self.eo == int(self.eo)
         self.eo = int(self.eo)
+
         # architecture dependent
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels=input_size,
+                      out_channels=16,
+                      kernel_size=4,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=16,
+                      out_channels=16,
+                      kernel_size=4,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=16,
+                      out_channels=16,
+                      kernel_size=2,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=16,
+                      out_channels=code_len*2,
+                      kernel_size=1,
+                      stride=1, padding=0),
+            nn.BatchNorm2d(code_len*2),
+            nn.ReLU(True),
+           )
+        # found via experimentation
+        n = 16
+        self.fc21 = nn.Linear(encoder_output_size, code_len)
+        self.fc22 = nn.Linear(encoder_output_size, code_len)
         self.fc3 = nn.Linear(code_len, encoder_output_size)
-        self.decoder = nn.Sequential(
-                # 4x4
-                nn.ConvTranspose2d(in_channels=code_len*2,
-                       out_channels=32,
-                       kernel_size=1,
-                       stride=1, padding=0),
-                 nn.BatchNorm2d(32),
-                 nn.ReLU(True),
-                 # 4x4 -->  8x8
-                 nn.ConvTranspose2d(in_channels=32,
-                       out_channels=32,
-                       kernel_size=4,
-                       stride=2, padding=1),
-                 nn.BatchNorm2d(32),
-                 nn.ReLU(True),
-                 # 8>14
-                 nn.ConvTranspose2d(in_channels=32,
-                         out_channels=32,
-                         kernel_size=2,
-                         stride=2, padding=1),
-                 nn.BatchNorm2d(32),
-                 nn.ReLU(True),
-                 # 14->28
-                 nn.ConvTranspose2d(in_channels=32,
-                         out_channels=32,
-                         kernel_size=2,
-                         stride=2, padding=0),
-                 nn.BatchNorm2d(32),
-                 nn.ReLU(True),
-                )
-        self.out_layer = nn.ConvTranspose2d(in_channels=32,
+        self.out_layer = nn.ConvTranspose2d(in_channels=n,
                          out_channels=output_size,
                          kernel_size=1,
                          stride=1, padding=0)
@@ -110,12 +110,149 @@ class ConvDecoder(nn.Module):
         # set bias to 0.5 for sigmoid with bce - 0 when using dml
         self.out_layer.bias.data.fill_(last_layer_bias)
 
-    def forward(self, z):
-        # z input size is (bs, code_len)
+        self.decoder = nn.Sequential(
+                # 4x4
+                nn.ConvTranspose2d(in_channels=code_len*2,
+                       out_channels=n,
+                       kernel_size=1,
+                       stride=1, padding=0),
+                 nn.BatchNorm2d(n),
+                 nn.ReLU(True),
+                 # 4x4 -->  8x8
+                 nn.ConvTranspose2d(in_channels=n,
+                       out_channels=n,
+                       kernel_size=4,
+                       stride=2, padding=1),
+                 nn.BatchNorm2d(n),
+                 nn.ReLU(True),
+                 # 8>14
+                 nn.ConvTranspose2d(in_channels=n,
+                         out_channels=n,
+                         kernel_size=2,
+                         stride=2, padding=1),
+                 nn.BatchNorm2d(16),
+                 nn.ReLU(True),
+                 # 14->28
+                 nn.ConvTranspose2d(in_channels=n,
+                         out_channels=n,
+                         kernel_size=2,
+                         stride=2, padding=0),
+                 nn.BatchNorm2d(n),
+                 nn.ReLU(True),
+                self.out_layer,
+                )
+
+
+    def encode(self, x):
+        o = self.encoder(x)
+        ol = o.view(o.shape[0], o.shape[1]*o.shape[2]*o.shape[3])
+        return self.fc21(ol), self.fc22(ol)
+
+    def decode(self, z):
         co = F.relu(self.fc3(z))
         col = co.view(co.shape[0], self.code_len*2, self.eo, self.eo)
-        out = self.decoder(col)
-        return self.out_layer(out)
+        do = self.decoder(col)
+        return do
+
+    def reparameterize(self, mu, logvar):
+        if self.training:
+            std = torch.exp(0.5*logvar)
+            eps = torch.randn_like(std)
+            o = eps.mul(std).add_(mu)
+            return o
+        else:
+            return mu
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z), z, mu, logvar
+
+class ConvEncodeDecode(nn.Module):
+    def __init__(self, code_len, input_size=1, output_size=1, encoder_output_size=1000, last_layer_bias=0.5):
+        super(ConvEncodeDecode, self).__init__()
+        self.code_len = code_len
+        # find reshape to match encoder --> eo is 4 with mnist (28,28)  and
+        # code_len of 64
+        # eo should be 7 for mnist
+        self.eo = np.sqrt(encoder_output_size/(2*code_len))
+        assert self.eo == int(self.eo)
+        self.eo = int(self.eo)
+        # architecture dependent
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels=input_size,
+                      out_channels=16,
+                      kernel_size=4,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=16,
+                      out_channels=32,
+                      kernel_size=4,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=32,
+                      out_channels=code_len*2,
+                      kernel_size=1,
+                      stride=1, padding=0),
+            nn.BatchNorm2d(code_len*2),
+            nn.ReLU(True),
+           )
+        self.fc21 = nn.Linear(encoder_output_size, code_len)
+        self.fc22 = nn.Linear(encoder_output_size, code_len)
+        self.fc3 = nn.Linear(code_len, encoder_output_size)
+
+        self.out_layer = nn.ConvTranspose2d(in_channels=16,
+                        out_channels=output_size,
+                        kernel_size=4,
+                        stride=2, padding=1)
+
+        # set bias to 0.5 for sigmoid with bce - 0 when using dml
+        self.out_layer.bias.data.fill_(last_layer_bias)
+
+        self.decoder = nn.Sequential(
+               nn.ConvTranspose2d(in_channels=code_len*2,
+                      out_channels=32,
+                      kernel_size=1,
+                      stride=1, padding=0),
+                nn.BatchNorm2d(32),
+                nn.ReLU(True),
+                nn.ConvTranspose2d(in_channels=32,
+                      out_channels=16,
+                      kernel_size=4,
+                      stride=2, padding=1),
+                nn.BatchNorm2d(16),
+                nn.ReLU(True),
+                self.out_layer
+                     )
+
+    def encode(self, x):
+        o = self.encoder(x)
+        ol = o.view(o.shape[0], o.shape[1]*o.shape[2]*o.shape[3])
+        return self.fc21(ol), self.fc22(ol)
+
+    def decode(self, z):
+        co = F.relu(self.fc3(z))
+        col = co.view(co.shape[0], self.code_len*2, self.eo, self.eo)
+        do = self.decoder(col)
+        return do
+
+    def reparameterize(self, mu, logvar):
+        if self.training:
+            std = torch.exp(0.5*logvar)
+            eps = torch.randn_like(std)
+            o = eps.mul(std).add_(mu)
+            return o
+        else:
+            return mu
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z), z, mu, logvar
+
+
 
 class PriorNetwork(nn.Module):
     def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):
