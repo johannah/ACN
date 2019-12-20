@@ -382,15 +382,16 @@ def sample(model_dict, data_dict, info):
                     # teacher forced version
                     print('data', data.min(), data.max())
                     print('target', target.min(), target.max())
+                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch)
                     if info['rec_loss_type'] == 'bce':
                         assert target.max() <=1
                         assert target.min() >=0
-                        yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch))
+                        pcnn_yhat_batch = torch.sigmoid(pcnn_yhat_batch)
                     elif info['rec_loss_type'] == 'dml':
                         assert target.max() <=1
                         assert target.min() >=-1
-                        yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                        yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_yhat_batch, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                        pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_yhat_batch, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                     else:
                         raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
@@ -413,25 +414,30 @@ def sample(model_dict, data_dict, info):
                                 if not k%5:
                                     building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
 
+                    print('deconv_yhat_batch', deconv_yhat_batch.min(), deconv_yhat_batch.max())
+                    print('pcnn_yhat_batch', pcnn_yhat_batch.min(), pcnn_yhat_batch.max())
                     print('canvas', canvas.min(), canvas.max())
-                    print('yhat_batch', yhat_batch.min(), yhat_batch.max())
-                    f,ax = plt.subplots(bs, 3, sharex=True, sharey=True, figsize=(3,bs))
-                    nptarget = data.detach().cpu().numpy()
-                    npyhat = yhat_batch.detach().cpu().numpy()
-                    npoutput = canvas.detach().cpu().numpy()
+                    f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
+                    np_target = data.detach().cpu().numpy()
+                    np_deconv_yhat = deconv_yhat_batch.detach().cpu().numpy()
+                    np_pcnn_yhat = pcnn_yhat_batch.detach().cpu().numpy()
+                    np_output = canvas.detach().cpu().numpy()
                     for idx in range(bs):
-                        ax[idx,0].matshow(nptarget[idx,0], cmap=plt.cm.gray)
-                        ax[idx,1].matshow(npyhat[idx,0]  , cmap=plt.cm.gray)
-                        ax[idx,2].matshow(npoutput[idx,0], cmap=plt.cm.gray)
+                        ax[idx,0].matshow(np_target[idx,0], cmap=plt.cm.gray)
+                        ax[idx,1].matshow(np_deconv_yhat[idx,0], cmap=plt.cm.gray)
+                        ax[idx,2].matshow(np_pcnn_yhat[idx,0], cmap=plt.cm.gray)
+                        ax[idx,3].matshow(np_output[idx,0], cmap=plt.cm.gray)
                         #ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
                         #ax[idx,1].imshow(npyhat[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
                         #ax[idx,2].imshow(npoutput[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
                         ax[idx,0].set_title('true')
-                        ax[idx,1].set_title('tf')
-                        ax[idx,2].set_title('sam')
+                        ax[idx,1].set_title('conv')
+                        ax[idx,2].set_title('tf')
+                        ax[idx,3].set_title('sam')
                         ax[idx,0].axis('off')
                         ax[idx,1].axis('off')
                         ax[idx,2].axis('off')
+                        ax[idx,3].axis('off')
                     iname = output_savepath + '_sample_%s.png'%phase
                     print('plotting %s'%iname)
                     plt.savefig(iname)
