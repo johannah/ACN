@@ -133,17 +133,13 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         bs,c,h,w = target.shape
         model_dict['opt'].zero_grad()
         z, u_q, s_q = model_dict['encoder_model'](data)
-        code_length = z.shape[1]
         if phase == 'train':
             # fit knn during training
             model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
             model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
         u_p, s_p = model_dict['prior_model'](u_q)
         # calculate loss
-        kl = kl_loss_function(u_q, s_q, u_p, s_p)
-        kl = kl.view(bs*code_length).sum(dim=-1).mean()
-        # scale kl cost by size of data
-        #kl *= code_length / float(c * h * w)
+        kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
         data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
         yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z)
         if rec_loss_type  == 'bce':
@@ -152,7 +148,9 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         if rec_loss_type == 'dml':
             # TODO - what normalization is needed here
             # input into dml should be bt -1 and 1
-            rec_loss = discretized_mix_logistic_loss(yhat_batch, target)
+            # pcnn starts at kl:6 dml:3017 with sum reduction on Fashion MNIST -
+            # not sure if this model will train yet
+            rec_loss = discretized_mix_logistic_loss(yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
         loss = kl+rec_loss
         if phase == 'train':
             loss.backward()
@@ -432,13 +430,15 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=394)
     parser.add_argument('--num_threads', default=2)
     parser.add_argument('-se', '--save_every_epochs', default=5, type=int)
-    parser.add_argument('-bs', '--batch_size', default=84, type=int)
+    parser.add_argument('-bs', '--batch_size', default=128, type=int)
     parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
     parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
+    parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
+    # batch norm resulted in worse outcome in pixel-cnn-only model
     parser.add_argument('--use_batch_norm', default=False, action='store_true')
     parser.add_argument('--output_projection_size', default=32, type=int)
     # right now, still using float input for bce (which seemes to work) --
@@ -450,7 +450,6 @@ if __name__ == '__main__':
     # acn model setup
     parser.add_argument('-cl', '--code_length', default=64, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
-    #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--pixel_cnn_dim', default=64, type=int, help='pixel cnn dimension')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
@@ -494,8 +493,9 @@ if __name__ == '__main__':
             do='_do%s'%args.dropout_rate
         else:
             do=''
+        lo = '_r%s'%args.reduction
         pl = '_%s'%args.pixel_cnn_dim
-        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+bn+do+pl
+        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+bn+do+pl+lo
         base_filepath = os.path.join(args.model_savedir, args.exp_name)
     print('base filepath is %s'%base_filepath)
 
