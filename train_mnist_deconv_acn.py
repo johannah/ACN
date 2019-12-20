@@ -150,14 +150,15 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         u_p, s_p = model_dict['prior_model'](u_q)
         # calculate loss
         kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
-        #kl = kl.view(bs*code_length).sum(dim=-1).mean()
-        # scale kl cost by size of data
-        #kl *= code_length / float(c * h * w)
         if rec_loss_type  == 'bce':
-            # in  the sum-based loss model that runs - kl is .012 and bce is 2.2 at step 204k
+            # input into dml should be bt 0 and 1 (sigmoid used on output)
+            # in  the sum-based bce loss model that works - kl is .012 and bce is
+            # 2.2 at step 204k on FashionMNIST
             rec_loss = F.binary_cross_entropy(torch.sigmoid(yhat_batch), target, reduction=info['reduction'])
         if rec_loss_type == 'dml':
             # input into dml should be bt -1 and 1
+            # in sum-based dml FashionMNIST that works at 240k examples the
+            # kl is at ~8 and dml_loss is around 2100
             rec_loss = discretized_mix_logistic_loss(yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
         loss = kl+rec_loss
         if phase == 'train':
@@ -355,8 +356,10 @@ if __name__ == '__main__':
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
     parser.add_argument('-e', '--exp_name', default='deconv_acn_large_rewrite_sum', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
+    # sum obviously trains on fashion mnist after < 1e6 examples, but it isn't
+    # obvious to me at this point that mean will train (though it does on normal
+    # mnist)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
-    #parser.add_argument('--use_batch_norm', default=False, action='store_true')
     parser.add_argument('--output_projection_size', default=32, type=int)
     # right now, still using float input for bce (which seemes to work) --
     # should actually convert data to binary...
