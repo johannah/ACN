@@ -178,7 +178,8 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             train_cnt+=bs
         if idx == num_batches-2:
             # store example near end for plotting
-            example = {'data':data.detach().cpu(), 'target':target.detach().cpu(),
+            example = {'data':data.detach().cpu(),
+                       'target':target.detach().cpu(),
                        'deconv_yhat':deconv_yhat_batch.detach().cpu(),
                        'pcnn_yhat':pcnn_yhat_batch.detach().cpu(),
                        }
@@ -378,30 +379,42 @@ def sample(model_dict, data_dict, info):
                 for idx, (data, label, batch_idx) in enumerate(data_loader):
                     bs = min([data.shape[0], 10])
                     target = data = data[:bs].to(info['device'])
-                    deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
+                    deconv_output, z, u_q, s_q = model_dict['conv_model'](data)
                     # teacher forced version
                     print('data', data.min(), data.max())
                     print('target', target.min(), target.max())
-                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch)
+                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_output)
                     if info['rec_loss_type'] == 'bce':
                         assert target.max() <=1
                         assert target.min() >=0
+                        deconv_yhat_batch = torch.sigmoid(deconv_output)
                         pcnn_yhat_batch = torch.sigmoid(pcnn_yhat_batch)
                     elif info['rec_loss_type'] == 'dml':
                         assert target.max() <=1
                         assert target.min() >=-1
-                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_yhat_batch, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                         pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_yhat_batch, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                     else:
                         raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
-                    canvas = torch.zeros_like(target)
+                    np_target = data.detach().cpu().numpy()
+                    np_deconv_yhat = deconv_yhat_batch.detach().cpu().numpy()
+                    np_pcnn_yhat = pcnn_yhat_batch.detach().cpu().numpy()
+                    #canvas = deconv_yhat_batch
+                    if args.use_zero_as_canvas:
+                        print('using zero output as sample canvas')
+                        canvas = torch.zeros_like(deconv_yhat_batch)
+                        st_can = '_zc'
+                    else:
+                        print('using deconv output as sample canvas')
+                        canvas = deconv_yhat_batch
+                        st_can = '_dc'
                     building_canvas = []
                     for i in range(canvas.shape[1]):
                         for j in range(canvas.shape[2]):
                             print('sampling row: %s'%j)
                             for k in range(canvas.shape[3]):
-                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z)
+                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z, spatial_condition=deconv_output)
                                 if info['rec_loss_type'] == 'bce':
                                     # output should be bt 0 and 1 for canvas
                                     canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
@@ -418,9 +431,6 @@ def sample(model_dict, data_dict, info):
                     print('pcnn_yhat_batch', pcnn_yhat_batch.min(), pcnn_yhat_batch.max())
                     print('canvas', canvas.min(), canvas.max())
                     f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
-                    np_target = data.detach().cpu().numpy()
-                    np_deconv_yhat = deconv_yhat_batch.detach().cpu().numpy()
-                    np_pcnn_yhat = pcnn_yhat_batch.detach().cpu().numpy()
                     np_output = canvas.detach().cpu().numpy()
                     for idx in range(bs):
                         ax[idx,0].matshow(np_target[idx,0], cmap=plt.cm.gray)
@@ -438,7 +448,7 @@ def sample(model_dict, data_dict, info):
                         ax[idx,1].axis('off')
                         ax[idx,2].axis('off')
                         ax[idx,3].axis('off')
-                    iname = output_savepath + '_sample_%s.png'%phase
+                    iname = output_savepath + st_can + '_sample_%s.png'%phase
                     print('plotting %s'%iname)
                     plt.savefig(iname)
                     plt.close()
@@ -462,7 +472,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=394)
     parser.add_argument('--num_threads', default=2)
     parser.add_argument('-se', '--save_every_epochs', default=5, type=int)
-    parser.add_argument('-bs', '--batch_size', default=128, type=int)
+    parser.add_argument('-bs', '--batch_size', default=84, type=int)
     parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
@@ -494,6 +504,7 @@ if __name__ == '__main__':
     # sampling info
     parser.add_argument('-s', '--sample', action='store_true', default=False)
     parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
+    parser.add_argument('-z', '--use_zero_as_canvas', action='store_true', default=False)
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=10, type=int, help='perplexity used in scikit-learn tsne call')

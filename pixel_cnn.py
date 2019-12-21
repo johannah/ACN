@@ -43,15 +43,18 @@ class GatedMaskedConv2d(nn.Module):
         self.n_classes = n_classes
         if self.n_classes is not None:
             self.class_condition_embedding = nn.Embedding(self.n_classes, 2*self.dim)
+            print('creating pixel cnn with class conditioning')
         if self.float_condition_size is not None:
             # below where we make 2*self.dim*self.hsize*self.wsize is wrong -
             # basically only trains with dim=1 --> 'linear residual connections'
             #self.float_condition_layer = nn.Linear(self.float_condition_size, 2*self.dim*self.hsize*self.wsize)
             self.float_condition_layer = nn.Linear(self.float_condition_size, 2*self.dim)
+            print('creating pixel cnn with float conditioning')
         if self.spatial_condition_size is not None:
             cond_kernel_shape = (kernel, kernel)
             cond_padding_shape = (kernel//2, kernel//2)
             self.spatial_condition_stack = nn.Conv2d(self.spatial_condition_size, self.dim*2, kernel_size=cond_kernel_shape, stride=1, padding=cond_padding_shape)
+            print('creating pixel cnn with spatial conditioning')
         vkernel_shape = (kernel//2 + 1, kernel)
         vpadding_shape = (kernel//2, kernel//2)
 
