@@ -252,6 +252,41 @@ class ConvEncodeDecode(nn.Module):
         z = self.reparameterize(mu, logvar)
         return self.decode(z), z, mu, logvar
 
+class Upsample(nn.Module):
+    def __init__(self, input_size=1, output_size=1):
+        super(Upsample, self).__init__()
+        """"
+        test code to upsample forcibly downsampled image for spatial conditioning
+        expects image of size bs,x,7,7 and will output bs,x,28,28
+        """
+        self.eo = 7
+        n = 16
+        self.out_layer = nn.ConvTranspose2d(in_channels=n,
+                        out_channels=output_size,
+                        kernel_size=4,
+                        stride=2, padding=1)
+
+        self.upsample = nn.Sequential(
+               nn.ConvTranspose2d(in_channels=input_size,
+                      out_channels=n,
+                      kernel_size=1,
+                      stride=1, padding=0),
+                nn.BatchNorm2d(n),
+                nn.ReLU(True),
+                nn.ConvTranspose2d(in_channels=n,
+                      out_channels=n,
+                      kernel_size=4,
+                      stride=2, padding=1),
+                nn.BatchNorm2d(n),
+                nn.ReLU(True),
+                self.out_layer
+                     )
+
+    def forward(self, x):
+        return self.upsample(x)
+
+
+
 
 
 class PriorNetwork(nn.Module):
