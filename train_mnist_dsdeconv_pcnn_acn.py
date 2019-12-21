@@ -33,7 +33,7 @@ from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_log
 
 from pixel_cnn import GatedPixelCNN
 from acn_models import ConvEncoder, PriorNetwork
-from acn_models import PriorNetwork, ConvEncodeDecodeLarge
+from acn_models import PriorNetwork, ConvEncodeDecodeLarge, Upsample
 from IPython import embed
 
 
@@ -104,7 +104,10 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
                                encoder_output_size=info['encoder_output_size'],
                                last_layer_bias=info['last_layer_bias'],
                                ).to(info['device'])
-
+    upsample_model = Upsample(
+                        input_size=info['input_channels'],
+                        output_size=info['input_channels'],
+                        ).to(info['device'])
 
 
     pcnn_decoder = GatedPixelCNN(input_dim=info['num_input_chans'],
@@ -114,12 +117,13 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
                                  float_condition_size=info['code_length'],
                                  # output dim is same as deconv output in this
                                  # case
-                                 spatial_condition_size=info['output_dim'],
+                                 #spatial_condition_size=info['output_dim'],
+                                 spatial_condition_size=info['input_channels'],
                                  last_layer_bias=info['last_layer_bias'],
                                  use_batch_norm=info['use_batch_norm'],
                                  output_projection_size=info['output_projection_size']).to(info['device'])
 
-    model_dict = {'conv_model':conv_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder}
+    model_dict = {'conv_model':conv_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder, 'upsample':upsample_model}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -143,7 +147,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         bs,c,h,w = target.shape
         model_dict['opt'].zero_grad()
         #z, u_q, s_q = model_dict['encoder_model'](data)
-        deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
+        deconv_out, z, u_q, s_q = model_dict['conv_model'](data)
         if phase == 'train':
             # fit knn during training
             model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
@@ -152,17 +156,27 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         # calculate loss
         kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
         data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
-        # pixel cnn reconstruction with spatial reconditioning
-        pcnn_yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z, spatial_condition=deconv_yhat_batch)
         if rec_loss_type  == 'bce':
-            deconv_rec_loss = F.binary_cross_entropy(torch.sigmoid(deconv_yhat_batch), target, reduction=info['reduction'])
+            deconv_yhat_batch = torch.sigmoid(deconv_out)
+            deconv_rec_loss = F.binary_cross_entropy(deconv_yhat_batch, target, reduction=info['reduction'])
+        if rec_loss_type == 'dml':
+            deconv_rec_loss = discretized_mix_logistic_loss(deconv_out, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+            deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_out, info['nr_logistic_mix'], only_mean=False)
+        # downsample deconv for spatial conditioning
+        # deconv_yhat_batch is [bs,1,28,28] -> we want to downsample it by 4 by
+        # taking every 4 rows as input to spatial conditioning
+        sidxs = [2,6,10,14,18,22,26]
+        small_deconv = model_dict['upsample'](deconv_yhat_batch[:,:,sidxs][:,:,:,sidxs])
+
+        # pixel cnn reconstruction with spatial reconditioning
+        pcnn_yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z, spatial_condition=small_deconv)
+        if rec_loss_type  == 'bce':
             pcnn_rec_loss = F.binary_cross_entropy(torch.sigmoid(pcnn_yhat_batch), target, reduction=info['reduction'])
         if rec_loss_type == 'dml':
             # TODO - what normalization is needed here
             # input into dml should be bt -1 and 1
             # pcnn starts at kl:6 dml:3017 with sum reduction on Fashion MNIST -
             # not sure if this model will train yet
-            deconv_rec_loss = discretized_mix_logistic_loss(deconv_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
             pcnn_rec_loss = discretized_mix_logistic_loss(pcnn_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
         loss = kl+deconv_rec_loss+pcnn_rec_loss
         if phase == 'train':
@@ -477,8 +491,8 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_acn_deconv', help='name of experiment')
-    parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
+    parser.add_argument('-e', '--exp_name', default='pcnn_acn_dsdeconv', help='name of experiment')
+    parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     # batch norm resulted in worse outcome in pixel-cnn-only model
     parser.add_argument('--use_batch_norm', default=False, action='store_true')
