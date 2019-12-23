@@ -193,7 +193,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                                                                        dropout_rate=info['dropout_rate'])
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
-        if not epoch_cnt % info['save_every_epochs']:
+        if not epoch_cnt % info['save_every_epochs'] or epoch_cnt == 1:
             # make a checkpoint
             print('starting valid phase')
             model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt,
@@ -435,8 +435,8 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
-    parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
+    parser.add_argument('-e', '--exp_name', default='pcnn_acn_sumsanity', help='name of experiment')
+    parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     # batch norm resulted in worse outcome in pixel-cnn-only model
     parser.add_argument('--use_batch_norm', default=False, action='store_true')
