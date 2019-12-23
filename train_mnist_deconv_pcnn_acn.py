@@ -526,6 +526,7 @@ if __name__ == '__main__':
     elif args.model_loadpath != '':
         # use full path to model
         base_filepath = os.path.split(args.model_loadpath)[0]
+        args.exp_name = ''
     else:
         # create new base_filepath
         if args.use_batch_norm:
