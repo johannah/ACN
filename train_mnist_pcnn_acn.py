@@ -430,7 +430,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=394)
     parser.add_argument('--num_threads', default=2)
     parser.add_argument('-se', '--save_every_epochs', default=5, type=int)
-    parser.add_argument('-bs', '--batch_size', default=128, type=int)
+    parser.add_argument('-bs', '--batch_size', default=84, type=int)
     parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')

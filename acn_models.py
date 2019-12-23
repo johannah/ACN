@@ -433,7 +433,128 @@ class ConvEncodeDecodeLargeVQVAE(nn.Module):
         # pytorch gives real min and arg min - select argmin
         # this is the closest k for each sample - Equation 1
         # latents is a array of integers
-        # 12-19 mnist latents are size bs,4,4
+        # mnist latents are size bs,4,4
+        latents = dists.min(-1)[1]
+        # look up cluster centers
+        x_tilde, z_q_x = self.decode_clusters(latents, N, H, W, C)
+        return x_tilde, z_e_x, z_q_x, latents
+
+    def decode_clusters(self, latents, N, H, W, C):
+        z_q_x = self.embedding(latents.view(latents.shape[0], -1))
+        # back to NCHW (orig) - now cluster centers/class
+        z_q_x = z_q_x.view(N, H, W, C).permute(0, 3, 1, 2)
+        # put quantized data through decoder
+        x_tilde = self.decoder(z_q_x)
+        # Move prediction to the z_q_x from z_e_x so that I can decode forward
+        # can predict value or reward
+        #return x_tilde, z_q_x, action, reward
+        return x_tilde, z_q_x
+
+
+class VQVAE(nn.Module):
+    def __init__(self, input_size=1, output_size=1,
+                       encoder_output_size=1000, last_layer_bias=0.5, num_clusters=512, num_z=32):
+        super(VQVAE, self).__init__()
+        self.encoder_output_size = encoder_output_size
+        # architecture dependent
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels=input_size,
+                      out_channels=16,
+                      kernel_size=4,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=16,
+                      out_channels=16,
+                      kernel_size=4,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=16,
+                      out_channels=16,
+                      kernel_size=2,
+                      stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=16,
+                      out_channels=num_z,
+                      kernel_size=1,
+                      stride=1, padding=0),
+            nn.BatchNorm2d(num_z),
+            nn.ReLU(True),
+           )
+        # found via experimentation
+        n = 16
+
+        self.out_layer = nn.ConvTranspose2d(in_channels=n,
+                         out_channels=output_size,
+                         kernel_size=1,
+                         stride=1, padding=0)
+
+        # set bias to 0.5 for sigmoid with bce - 0 when using dml
+        self.out_layer.bias.data.fill_(last_layer_bias)
+        ## vq embedding scheme
+        self.embedding = nn.Embedding(num_clusters, num_z)
+        # common scaling for embeddings - variance roughly scales with num_clusters
+        self.embedding.weight.data.copy_(1./num_clusters * torch.randn(num_clusters, num_z))
+
+        self.decoder = nn.Sequential(
+                # 4x4
+                nn.ConvTranspose2d(in_channels=num_z,
+                       out_channels=n,
+                       kernel_size=1,
+                       stride=1, padding=0),
+                 nn.BatchNorm2d(n),
+                 nn.ReLU(True),
+                 # 4x4 -->  8x8
+                 nn.ConvTranspose2d(in_channels=n,
+                       out_channels=n,
+                       kernel_size=4,
+                       stride=2, padding=1),
+                 nn.BatchNorm2d(n),
+                 nn.ReLU(True),
+                 # 8>14
+                 nn.ConvTranspose2d(in_channels=n,
+                         out_channels=n,
+                         kernel_size=2,
+                         stride=2, padding=1),
+                 nn.BatchNorm2d(16),
+                 nn.ReLU(True),
+                 # 14->28
+                 nn.ConvTranspose2d(in_channels=n,
+                         out_channels=n,
+                         kernel_size=2,
+                         stride=2, padding=0),
+                 nn.BatchNorm2d(n),
+                 nn.ReLU(True),
+                self.out_layer,
+                )
+
+    def forward(self, x):
+        o = self.encoder(x)
+        x_tilde, z_e_x, z_q_x, latents = self.vq_decode(o)
+        return x_tilde, z_e_x, z_q_x, latents
+
+    def vq_decode(self, z_e_x):
+        # NCHW is the order in the encoder
+        # (num, channels, height, width)
+        N, C, H, W = z_e_x.shape
+        # need NHWC instead of default NCHW for easier computations
+        z_e_x_transposed = z_e_x.permute(0,2,3,1)
+        # needs C,K
+        emb = self.embedding.weight.transpose(0,1)
+        # broadcast to determine distance from encoder output to clusters
+        # NHWC -> NHWCK
+        measure = z_e_x_transposed.unsqueeze(4) - emb[None, None, None]
+        # num_clusters=512, num_z=64
+        # measure is of shape bs,10,10,64,512
+        # square each element, then sum over channels
+        # take sum over each z - find min
+        dists = torch.pow(measure, 2).sum(-2)
+        # pytorch gives real min and arg min - select argmin
+        # this is the closest k for each sample - Equation 1
+        # latents is a array of integers
+        # mnist latents are size bs,4,4
         latents = dists.min(-1)[1]
         # look up cluster centers
         x_tilde, z_q_x = self.decode_clusters(latents, N, H, W, C)
