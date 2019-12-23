@@ -173,14 +173,20 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         # encourage vq embedding space to be good
         loss_2 = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
         loss_3 = info['vq_commitment_beta']*F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
-        model_dict['vq_conv_model'].embedding.zero_grad()
+        #if info['reduction'] == 'sum':
+        #    # scale by hxw because loss2 was huge - 16000 and loss 3 was 4000
+        #    dd_scale = z_e_x.shape[2]*z_e_x.shape[3]
+        #    loss_2 /= dd_scale
+        #    loss_3 /= dd_scale
+
         loss = kl+rec_loss+loss_2+loss_3
         if phase == 'train':
-            model_dict = clip_parameters(model_dict)
+            model_dict['vq_conv_model'].embedding.zero_grad()
             loss.backward(retain_graph=True)
             z_e_x.backward(z_q_x.grad, retain_graph=True)
             loss_2.backward(retain_graph=True)
             loss_3.backward()
+            model_dict = clip_parameters(model_dict)
             model_dict['opt'].step()
         run+=bs
         kl_running+=kl.item()
@@ -198,12 +204,12 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
             loss_avg = {'kl':kl_running/run, rec_loss_type:rec_running/run,
-                        'loss':loss_running/run, 'loss2':loss2_running/run, 'loss3':loss3_running/run}
+                        'loss':loss_running/run, 'vq':loss2_running/run, 'commit':loss3_running/run}
             print(train_cnt, idx, loss_avg)
 
     # store average loss for return
     loss_avg = {'kl':kl_running/run, rec_loss_type:rec_running/run,
-                'loss':loss_running/run, 'loss2':loss2_running/run, 'loss3':loss3_running/run}
+                'loss':loss_running/run, 'vq':loss2_running/run, 'commit':loss3_running/run}
     print("finished %s after %s secs at cnt %s"%(phase,
                                                 time.time()-st,
                                                 train_cnt,
