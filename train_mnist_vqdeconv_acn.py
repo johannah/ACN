@@ -133,7 +133,6 @@ def clip_parameters(model_dict, clip_val=10):
     clip_grad_value_(parameters, clip_val)
     return model_dict
 
-
 def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
     st = time.time()
     run = rec_running = kl_running = loss_running = loss2_running = loss3_running =  0.0
@@ -172,10 +171,10 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
 
         rec_loss.backward(retain_graph=True)
         # encourage vq embedding space to be good
-        loss_2 = F.mse_loss(z_q_x, z_e_x.detach())
-        loss_3 = info['vq_commitment_beta']*F.mse_loss(z_e_x, z_q_x.detach())
+        loss_2 = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
+        loss_3 = info['vq_commitment_beta']*F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
         model_dict['vq_conv_model'].embedding.zero_grad()
-        loss = kl+rec_loss
+        loss = kl+rec_loss+loss_2+loss_3
         if phase == 'train':
             model_dict = clip_parameters(model_dict)
             loss.backward(retain_graph=True)
@@ -196,7 +195,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             # store example near end for plotting
             if rec_loss_type == 'dml':
                 yhat_batch = sample_from_discretized_mix_logistic(x_d, info['nr_logistic_mix'])
-            example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch}
+            example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
             loss_avg = {'kl':kl_running/run, rec_loss_type:rec_running/run,
                         'loss':loss_running/run, 'loss2':loss2_running/run, 'loss3':loss3_running/run}
@@ -227,7 +226,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                                                                        dropout_rate=info['dropout_rate'])
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
-        if not epoch_cnt % info['save_every_epochs']:
+        if not epoch_cnt % info['save_every_epochs'] or epoch_cnt == 1:
             # make a checkpoint
             print('starting valid phase')
             model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt,
@@ -375,7 +374,7 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='deconv_acn_large_rewrite_sum', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='vq_deconv_acn', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     # sum obviously trains on fashion mnist after < 1e6 examples, but it isn't
     # obvious to me at this point that mean will train (though it does on normal
