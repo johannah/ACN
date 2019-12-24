@@ -38,7 +38,7 @@ from acn_models import PriorNetwork, ConvEncodeDecodeLargeVQVAE
 from IPython import embed
 
 
-def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMNIST'):
+def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     '''
     load details of previous model if applicable, otherwise create new models
     '''
@@ -99,7 +99,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
 
     # setup models
     # acn prior with vqvae embedding
-    vq_conv_model = ConvEncodeDecodeLargeVQVAE(code_len=info['code_length'],
+    vq_acn_model = ConvEncodeDecodeLargeVQVAE(code_len=info['code_length'],
                                input_size=info['input_channels'],
                                output_size=info['output_dim'],
                                encoder_output_size=info['encoder_output_size'],
@@ -111,7 +111,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     prior_model = PriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
 
-    model_dict = {'vq_conv_model':vq_conv_model, 'prior_model':prior_model}
+    model_dict = {'vq_acn_model':vq_acn_model, 'prior_model':prior_model}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -143,7 +143,7 @@ def run(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_
         # dropout on input is different than what I've done in the pcnn_acn
         # model - there I only did dropout on the pcnn_decoder tf
         data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
-        x_d, z, u_q, s_q, z_e_x, z_q_x, latents = model_dict['vq_conv_model'](data)
+        x_d, z, u_q, s_q, z_e_x, z_q_x, latents = model_dict['vq_acn_model'](data)
         # latents are 84x4x4
         # z is 84x64
         if phase == 'train':
@@ -380,7 +380,7 @@ if __name__ == '__main__':
 
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
-    parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
+    parser.add_argument('--encoder_output_size', default=1024, help='output as a result of the flatten of the encoder - found experimentally')
     #parser.add_argument('--encoder_output_size', default=6272, help='output as a result of the flatten of the encoder - found experimentally')
     parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
     # vq model setup
@@ -427,7 +427,7 @@ if __name__ == '__main__':
     print('base filepath is %s'%base_filepath)
 
     info = create_new_info_dict(vars(args), base_filepath)
-    model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_conv_acn_pcnn_models(info, args.model_loadpath)
+    model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, args.model_loadpath)
     if args.tsne:
         call_tsne_plot(model_dict, data_dict, info)
     if args.walk:
