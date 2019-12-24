@@ -38,7 +38,7 @@ from acn_models import VQVAE
 from IPython import embed
 
 
-def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMNIST'):
+def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     '''
     load details of previous model if applicable, otherwise create new models
     '''
@@ -313,7 +313,7 @@ if __name__ == '__main__':
     print('base filepath is %s'%base_filepath)
 
     info = create_new_info_dict(vars(args), base_filepath)
-    model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_conv_acn_pcnn_models(info, args.model_loadpath)
+    model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, args.model_loadpath)
     if args.tsne:
         call_tsne_plot(model_dict, data_dict, info)
     if args.walk:
