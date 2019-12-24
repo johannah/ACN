@@ -118,9 +118,9 @@ def clip_parameters(model_dict, clip_val=10):
             clip_grad_value_(model.parameters(), clip_val)
     return model_dict
 
-def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
+def run(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
     st = time.time()
-    run = rec_running = kl_running = loss_running = vq_running = commit_running =  0.0
+    run = rec_running = loss_running = vq_running = commit_running =  0.0
     data_loader = data_dict[phase]
     model_dict = set_model_mode(model_dict, phase)
     vq_model = model_dict['vq_conv_model']
@@ -187,7 +187,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
     base_filename = os.path.split(info['base_filepath'])[1]
     while train_cnt < info['num_examples_to_train']:
         print('starting epoch %s on %s'%(epoch_cnt, info['device']))
-        model_dict, data_dict, train_loss_avg, train_example = run_acn(train_cnt,
+        model_dict, data_dict, train_loss_avg, train_example = run(train_cnt,
                                                                        model_dict,
                                                                        data_dict,
                                                                        phase='train',
@@ -199,7 +199,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
         if not epoch_cnt % info['save_every_epochs'] or epoch_cnt == 1:
             # make a checkpoint
             print('starting valid phase')
-            model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt,
+            model_dict, data_dict, valid_loss_avg, valid_example = run(train_cnt,
                                                                            model_dict,
                                                                            data_dict,
                                                                            phase='valid',
