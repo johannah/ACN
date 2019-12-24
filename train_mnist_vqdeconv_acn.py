@@ -125,17 +125,14 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 def clip_parameters(model_dict, clip_val=10):
-    parameters = []
     for name, model in model_dict.items():
         if 'model' in name:
-            parameters+=list(model.parameters())
-    # - TODO - don't think it works this way -----
-    clip_grad_value_(parameters, clip_val)
+            clip_grad_value_(model.parameters(), clip_val)
     return model_dict
 
-def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
+def run(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
     st = time.time()
-    run = rec_running = kl_running = loss_running = loss2_running = loss3_running =  0.0
+    run = rec_running = kl_running = loss_running = vq_running = commit_running =  0.0
     data_loader = data_dict[phase]
     model_dict = set_model_mode(model_dict, phase)
     num_batches = len(data_loader)
@@ -149,7 +146,6 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         x_d, z, u_q, s_q, z_e_x, z_q_x, latents = model_dict['vq_conv_model'](data)
         # latents are 84x4x4
         # z is 84x64
-        z_q_x.retain_grad()
         if phase == 'train':
             # fit acn knn during training
             model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
@@ -157,43 +153,27 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         u_p, s_p = model_dict['prior_model'](u_q)
         # calculate loss
         kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
-        if rec_loss_type  == 'bce':
-            # input into dml should be bt 0 and 1 (sigmoid used on output)
-            # in  the sum-based bce loss model that works - kl is .012 and bce is
-            # 2.2 at step 204k on FashionMNIST
-            x_d = torch.sigmoid(x_d)
-            rec_loss = F.binary_cross_entropy(x_d, target, reduction=info['reduction'])
-        if rec_loss_type == 'dml':
-            # input into dml should be bt -1 and 1
-            # in sum-based dml FashionMNIST that works at 240k examples the
-            # kl is at ~8 and dml_loss is around 2100
-            rec_loss = discretized_mix_logistic_loss(x_d, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
+        # input into dml should be bt -1 and 1
+        # in sum-based dml FashionMNIST that works at 240k examples the
+        # kl is at ~8 and dml_loss is around 2100
+        rec_loss = discretized_mix_logistic_loss(x_d, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
+        vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
+        commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
+        commit_loss *= info['vq_commitment_beta']
+        loss = kl+rec_loss+vq_loss+commit_loss
 
-        rec_loss.backward(retain_graph=True)
-        # encourage vq embedding space to be good
-        loss_2 = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
-        loss_3 = info['vq_commitment_beta']*F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
-        #if info['reduction'] == 'sum':
-        #    # scale by hxw because loss2 was huge - 16000 and loss 3 was 4000
-        #    dd_scale = z_e_x.shape[2]*z_e_x.shape[3]
-        #    loss_2 /= dd_scale
-        #    loss_3 /= dd_scale
-
-        loss = kl+rec_loss+loss_2+loss_3
-        if phase == 'train':
-            model_dict['vq_conv_model'].embedding.zero_grad()
-            loss.backward(retain_graph=True)
-            z_e_x.backward(z_q_x.grad, retain_graph=True)
-            loss_2.backward(retain_graph=True)
-            loss_3.backward()
-            model_dict = clip_parameters(model_dict)
-            model_dict['opt'].step()
         run+=bs
         kl_running+=kl.item()
         rec_running+=rec_loss.item()
         loss_running+=loss.item()
-        loss2_running+=loss_2.item()
-        loss3_running+=loss_3.item()
+        vq_running+=vq_loss.item()
+        commit_running+=commit_loss.item()
+
+        if phase == 'train':
+            model_dict = clip_parameters(model_dict)
+            loss.backward(retain_graph=True)
+            model_dict['opt'].step()
+
         # add batch size because it hasn't been added to train cnt yet
         if phase == 'train':
             train_cnt+=bs
@@ -204,12 +184,13 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
             loss_avg = {'kl':kl_running/run, rec_loss_type:rec_running/run,
-                        'loss':loss_running/run, 'vq':loss2_running/run, 'commit':loss3_running/run}
+                        'loss':loss_running/run,
+                        'vq':vq_running/run, 'commit':commit_running/run}
             print(train_cnt, idx, loss_avg)
 
-    # store average loss for return
     loss_avg = {'kl':kl_running/run, rec_loss_type:rec_running/run,
-                'loss':loss_running/run, 'vq':loss2_running/run, 'commit':loss3_running/run}
+                        'loss':loss_running/run,
+                        'vq':vq_running/run, 'commit':commit_running/run}
     print("finished %s after %s secs at cnt %s"%(phase,
                                                 time.time()-st,
                                                 train_cnt,
@@ -223,7 +204,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
     base_filename = os.path.split(info['base_filepath'])[1]
     while train_cnt < info['num_examples_to_train']:
         print('starting epoch %s on %s'%(epoch_cnt, info['device']))
-        model_dict, data_dict, train_loss_avg, train_example = run_acn(train_cnt,
+        model_dict, data_dict, train_loss_avg, train_example = run(train_cnt,
                                                                        model_dict,
                                                                        data_dict,
                                                                        phase='train',
@@ -235,7 +216,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
         if not epoch_cnt % info['save_every_epochs'] or epoch_cnt == 1:
             # make a checkpoint
             print('starting valid phase')
-            model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt,
+            model_dict, data_dict, valid_loss_avg, valid_example = run(train_cnt,
                                                                            model_dict,
                                                                            data_dict,
                                                                            phase='valid',
