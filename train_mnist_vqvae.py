@@ -113,19 +113,17 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 def clip_parameters(model_dict, clip_val=10):
-    parameters = []
     for name, model in model_dict.items():
         if 'model' in name:
-            parameters+=list(model.parameters())
-    # - TODO - don't think it works this way -----
-    clip_grad_value_(parameters, clip_val)
+            clip_grad_value_(model.parameters(), clip_val)
     return model_dict
 
 def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
     st = time.time()
-    run = rec_running = kl_running = loss_running = loss2_running = loss3_running =  0.0
+    run = rec_running = kl_running = loss_running = vq_running = commit_running =  0.0
     data_loader = data_dict[phase]
     model_dict = set_model_mode(model_dict, phase)
+    vq_model = model_dict['vq_conv_model']
     num_batches = len(data_loader)
     for idx, (data, label, batch_index) in enumerate(data_loader):
         target = data = data.to(device)
@@ -134,10 +132,9 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         # dropout on input is different than what I've done in the pcnn_acn
         # model - there I only did dropout on the pcnn_decoder tf
         data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
-        x_d, z_e_x, z_q_x, latents = model_dict['vq_conv_model'](data)
+        x_d, z_e_x, z_q_x, latents = vq_model(data)
         # latents are 84x4x4
         # z is 84x64
-        z_q_x.retain_grad()
         # input into dml should be bt -1 and 1
         # in sum-based dml FashionMNIST that works at 240k examples the
         # kl is at ~8 and dml_loss is around 2100
@@ -145,28 +142,20 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
 
         rec_loss.backward(retain_graph=True)
         # encourage vq embedding space to be good
-        loss_2 = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
-        loss_3 = info['vq_commitment_beta']*F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
-        #if info['reduction'] == 'sum':
-        #    # scale by hxw because loss2 was huge - 16000 and loss 3 was 4000
-        #    dd_scale = z_e_x.shape[2]*z_e_x.shape[3]
-        #    loss_2 /= dd_scale
-        #    loss_3 /= dd_scale
+        vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
+        commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
+        commit_loss *= info['vq_commitment_beta']
 
-        loss = rec_loss+loss_2+loss_3
+        loss = rec_loss+vq_loss+commit_loss
         if phase == 'train':
-            model_dict['vq_conv_model'].embedding.zero_grad()
+            clip_grad_value_(vq_model.parameters(), 5)
             loss.backward(retain_graph=True)
-            z_e_x.backward(z_q_x.grad, retain_graph=True)
-            loss_2.backward(retain_graph=True)
-            loss_3.backward()
-            model_dict = clip_parameters(model_dict)
             model_dict['opt'].step()
         run+=bs
         rec_running+=rec_loss.item()
         loss_running+=loss.item()
-        loss2_running+=loss_2.item()
-        loss3_running+=loss_3.item()
+        vq_running+=vq_loss.item()
+        commit_running+=commit_loss.item()
         # add batch size because it hasn't been added to train cnt yet
         if phase == 'train':
             train_cnt+=bs
@@ -176,12 +165,15 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
         if not idx % 10:
             loss_avg = {rec_loss_type:rec_running/run,
-                        'loss':loss_running/run, 'vq':loss2_running/run, 'commit':loss3_running/run}
+                        'loss':loss_running/run,
+                        'vq':vq_running/run, 'commit':commit_running/run}
             print(train_cnt, idx, loss_avg)
 
+    model_dict['vq_conv_model'] = vq_model
     # store average loss for return
     loss_avg = {rec_loss_type:rec_running/run,
-                'loss':loss_running/run, 'vq':loss2_running/run, 'commit':loss3_running/run}
+                        'loss':loss_running/run,
+                        'vq':vq_running/run, 'commit':commit_running/run}
     print("finished %s after %s secs at cnt %s"%(phase,
                                                 time.time()-st,
                                                 train_cnt,
@@ -253,13 +245,13 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--cuda', action='store_true', default=False)
     parser.add_argument('--seed', default=394)
     parser.add_argument('--num_threads', default=2)
-    parser.add_argument('-se', '--save_every_epochs', default=5, type=int)
-    parser.add_argument('-bs', '--batch_size', default=84, type=int)
+    parser.add_argument('-se', '--save_every_epochs', default=10, type=int)
+    parser.add_argument('-bs', '--batch_size', default=128, type=int)
     parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='vq_deconv_acn', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='vqvae', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     # sum obviously trains on fashion mnist after < 1e6 examples, but it isn't
     # obvious to me at this point that mean will train (though it does on normal
