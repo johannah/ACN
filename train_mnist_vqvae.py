@@ -34,7 +34,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import VQVAE
+from acn_models import VQVAEres
 from IPython import embed
 
 
@@ -86,20 +86,18 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     info['nmix'] =  (2*info['nr_logistic_mix']+info['nr_logistic_mix'])*info['num_output_chans']
     info['output_dim']  = info['nmix']
     # last layer for pcnn
-    info['last_layer_bias'] = 0.0
 
     # setup models
     # acn prior with vqvae embedding
-    vq_conv_model = VQVAE(
+    vq_model = VQVAEres(
                           input_size=info['input_channels'],
                           output_size=info['output_dim'],
-                          encoder_output_size=info['encoder_output_size'],
-                          last_layer_bias=info['last_layer_bias'],
+                          hidden_size=info['hidden_size'],
                           num_clusters=info['num_vqk'],
                           num_z=info['num_z'],
                                ).to(info['device'])
 
-    model_dict = {'vq_conv_model':vq_conv_model}
+    model_dict = {'vq_model':vq_model}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -118,62 +116,63 @@ def clip_parameters(model_dict, clip_val=10):
             clip_grad_value_(model.parameters(), clip_val)
     return model_dict
 
-def run(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
+def forward_pass(model_dict, data, label, batch_index, phase, info):
+    target = data = data.to(info['device'])
+    bs,c,h,w = target.shape
+    model_dict['opt'].zero_grad()
+    data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
+    vq_dml, z_e_x, z_q_x, latents = model_dict['vq_model'](data)
+    return model_dict, data, target, vq_dml, z_e_x, z_q_x, latents
+
+def account_losses(loss_dict):
+    loss_avg = {}
+    for key in loss_dict.keys():
+        if key != 'running':
+            loss_avg[key] = loss_dict[key]/loss_dict['running']
+    return loss_avg
+
+def run(train_cnt, model_dict, data_dict, phase, info):
     st = time.time()
-    run = rec_running = loss_running = vq_running = commit_running =  0.0
     data_loader = data_dict[phase]
+    loss_dict = {'running': 0,
+                 'loss':0,
+                 'vq_%s'%info['rec_loss_type']:0,
+                 'vq':0,
+                 'commit':0,
+                  }
     model_dict = set_model_mode(model_dict, phase)
-    vq_model = model_dict['vq_conv_model']
     num_batches = len(data_loader)
     for idx, (data, label, batch_index) in enumerate(data_loader):
-        target = data = data.to(device)
-        bs,c,h,w = target.shape
-        model_dict['opt'].zero_grad()
-        # dropout on input is different than what I've done in the pcnn_acn
-        # model - there I only did dropout on the pcnn_decoder tf
-        data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
-        x_d, z_e_x, z_q_x, latents = vq_model(data)
-        # latents are 84x4x4
-        # z is 84x64
-        # input into dml should be bt -1 and 1
-        # in sum-based dml FashionMNIST that works at 240k examples the
-        # kl is at ~8 and dml_loss is around 2100
-        rec_loss = discretized_mix_logistic_loss(x_d, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
-
-        rec_loss.backward(retain_graph=True)
+        bs,c,h,w = data.shape
+        fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+        model_dict, data, target, vq_dml, z_e_x, z_q_x, latents = fp_out
+        vq_rec_loss = discretized_mix_logistic_loss(vq_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
         # encourage vq embedding space to be good
         vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
         commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
         commit_loss *= info['vq_commitment_beta']
-
-        loss = rec_loss+vq_loss+commit_loss
+        loss = vq_rec_loss+vq_loss+commit_loss
+        loss_dict['running']+=bs
+        loss_dict['loss']+=loss.item()
+        loss_dict['vq_%s'%info['rec_loss_type']]+=vq_rec_loss.item()
+        loss_dict['vq']+= vq_loss.item()
+        loss_dict['commit']+= commit_loss.item()
         if phase == 'train':
-            clip_grad_value_(vq_model.parameters(), 5)
-            loss.backward(retain_graph=True)
+            model_dict = clip_parameters(model_dict, 5)
+            loss.backward()
             model_dict['opt'].step()
-        run+=bs
-        rec_running+=rec_loss.item()
-        loss_running+=loss.item()
-        vq_running+=vq_loss.item()
-        commit_running+=commit_loss.item()
         # add batch size because it hasn't been added to train cnt yet
         if phase == 'train':
             train_cnt+=bs
         if idx == num_batches-2:
             # store example near end for plotting
-            yhat_batch = sample_from_discretized_mix_logistic(x_d, info['nr_logistic_mix'])
-            example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':yhat_batch.detach().cpu()}
-        if not idx % 10:
-            loss_avg = {rec_loss_type:rec_running/run,
-                        'loss':loss_running/run,
-                        'vq':vq_running/run, 'commit':commit_running/run}
-            print(train_cnt, idx, loss_avg)
+            vq_yhat_batch = sample_from_discretized_mix_logistic(vq_dml, info['nr_logistic_mix'])
+            example = {'data':data.detach().cpu(), 'target':target.detach().cpu(), 'yhat':vq_yhat_batch.detach().cpu()}
+        if not idx % 50:
+            print(train_cnt, idx, account_losses(loss_dict))
 
-    model_dict['vq_conv_model'] = vq_model
     # store average loss for return
-    loss_avg = {rec_loss_type:rec_running/run,
-                        'loss':loss_running/run,
-                        'vq':vq_running/run, 'commit':commit_running/run}
+    loss_avg = account_losses(loss_dict)
     print("finished %s after %s secs at cnt %s"%(phase,
                                                 time.time()-st,
                                                 train_cnt,
@@ -187,25 +186,13 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
     base_filename = os.path.split(info['base_filepath'])[1]
     while train_cnt < info['num_examples_to_train']:
         print('starting epoch %s on %s'%(epoch_cnt, info['device']))
-        model_dict, data_dict, train_loss_avg, train_example = run(train_cnt,
-                                                                       model_dict,
-                                                                       data_dict,
-                                                                       phase='train',
-                                                                       device=info['device'],
-                                                                       rec_loss_type=info['rec_loss_type'],
-                                                                       dropout_rate=info['dropout_rate'])
+        model_dict, data_dict, train_loss_avg, train_example = run(train_cnt, model_dict, data_dict, phase='train', info=info)
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
         if not epoch_cnt % info['save_every_epochs'] or epoch_cnt == 1:
             # make a checkpoint
             print('starting valid phase')
-            model_dict, data_dict, valid_loss_avg, valid_example = run(train_cnt,
-                                                                           model_dict,
-                                                                           data_dict,
-                                                                           phase='valid',
-                                                                           device=info['device'],
-                                                                           rec_loss_type=info['rec_loss_type'],
-                                                                           dropout_rate=info['dropout_rate'])
+            model_dict, data_dict, valid_loss_avg, valid_example = run(train_cnt, model_dict, data_dict, phase='valid', info=info)
             for loss_key in valid_loss_avg.keys():
                 for lphase in ['train_losses', 'valid_losses']:
                     if loss_key not in info[lphase].keys():
@@ -247,11 +234,11 @@ if __name__ == '__main__':
     parser.add_argument('--num_threads', default=2)
     parser.add_argument('-se', '--save_every_epochs', default=10, type=int)
     parser.add_argument('-bs', '--batch_size', default=128, type=int)
-    parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
+    parser.add_argument('-lr', '--learning_rate', default=2e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
-    parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='vqvae', help='name of experiment')
+    parser.add_argument('--num_examples_to_train', default=int(10e9), type=int)
+    parser.add_argument('-e', '--exp_name', default='vqvae_res', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     # sum obviously trains on fashion mnist after < 1e6 examples, but it isn't
     # obvious to me at this point that mean will train (though it does on normal
@@ -260,14 +247,7 @@ if __name__ == '__main__':
     parser.add_argument('--output_projection_size', default=32, type=int)
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
     parser.add_argument('--nr_logistic_mix', default=10, type=int)
-    # acn model setup
-    parser.add_argument('-cl', '--code_length', default=64, type=int)
-    parser.add_argument('-k', '--num_k', default=5, type=int)
-
-    #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
-    parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
-    parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
-    #parser.add_argument('--encoder_output_size', default=6272, help='output as a result of the flatten of the encoder - found experimentally')
+    parser.add_argument('--hidden_size', default=256, type=int)
     parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
     # vq model setup
     parser.add_argument('--vq_commitment_beta', default=0.25, help='scale for loss 3 in vqvae - how hard to enforce commitment to cluster')
