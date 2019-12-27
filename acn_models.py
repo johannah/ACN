@@ -294,6 +294,7 @@ class Upsample(nn.Module):
     def forward(self, x):
         return self.upsample(x)
 
+
 class ConvEncodeDecodeLargeVQVAE(nn.Module):
     def __init__(self, code_len, input_size=1, output_size=1,
                        encoder_output_size=1000, last_layer_bias=0.5, num_clusters=512, num_z=32):
@@ -458,8 +459,149 @@ class VQEmbedding(nn.Module):
 
         return z_q_x, z_q_x_bar
 
+# rithesh version
+# https://github.com/ritheshkumar95/pytorch-vqvae/blob/master/vqvae.py
+class ResBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.ReLU(True),
+            nn.Conv2d(dim, dim, 3, 1, 1),
+            nn.BatchNorm2d(dim),
+            nn.ReLU(True),
+            nn.Conv2d(dim, dim, 1),
+            nn.BatchNorm2d(dim)
+        )
+
+    def forward(self, x):
+        return x + self.block(x)
+
+class VQVAEres(nn.Module):
+    def __init__(self, input_size=1, output_size=1, hidden_size=256,
+                       last_layer_bias=0.5, num_clusters=512, num_z=32):
+
+        super(VQVAEres, self).__init__()
+        self.num_clusters = num_clusters
+        self.num_z = num_z
+        self.hidden_size = hidden_size
+        self.encoder = nn.Sequential(
+            nn.Conv2d(input_size, hidden_size, 4, 2, 1),
+            nn.BatchNorm2d(hidden_size),
+            nn.ReLU(True),
+            nn.Conv2d(hidden_size, hidden_size, 4, 2, 1),
+            ResBlock(hidden_size),
+            ResBlock(hidden_size),
+            )
+        self.codebook = VQEmbedding(num_clusters, hidden_size)
+        self.decoder = nn.Sequential(
+                  ResBlock(hidden_size),
+                  ResBlock(hidden_size),
+                  nn.ConvTranspose2d(hidden_size, hidden_size, 4, 2, 1),
+                  nn.BatchNorm2d(hidden_size),
+                  nn.ReLU(True),
+                  nn.ConvTranspose2d(hidden_size, output_size, 4, 2, 1),
+                  )
+        self.apply(weights_init)
+
+    def encode(self, x):
+        z_e_x = self.encoder(x)
+        latents = self.codebook(z_e_x)
+        return z_e_x, latents
+
+    def decode(self, latents):
+        # TODO order/?
+        z_q_x = self.codebook.embedding(latents).permute(0,3,1,2) # BDHW
+        x_tilde = self.decoder(z_q_x)
+        return x_tilde, z_q_x
+
+    def forward(self, x):
+        z_e_x, latents = self.encode(x)
+        z_q_x_st, z_q_x = self.codebook.straight_through(z_e_x)
+        x_tilde = self.decoder(z_q_x_st)
+        return x_tilde, z_e_x, z_q_x, latents
+
+class ACNVQVAEres(nn.Module):
+    def __init__(self, code_len, input_size=1, output_size=1, encoder_output_size=1024,
+                       hidden_size=256,
+                       num_clusters=512, num_z=32):
+
+        super(ACNVQVAEres, self).__init__()
+        self.code_len = code_len
+        self.num_clusters = num_clusters
+        self.num_z = num_z
+        self.hidden_size = hidden_size
+        # encoder output size found experimentally when architecture changes
+        self.encoder_output_size = encoder_output_size
+        self.eo = 7
+
+        self.encoder = nn.Sequential(
+            nn.Conv2d(input_size, hidden_size, 4, 2, 1),
+            nn.BatchNorm2d(hidden_size),
+            nn.ReLU(True),
+            nn.Conv2d(hidden_size, hidden_size, 4, 2, 1),
+            ResBlock(hidden_size),
+            ResBlock(hidden_size),
+            # code len is arbitrary bottleneck
+            nn.Conv2d(hidden_size, 16, 1, 1, 0),
+            )
+        self.fc21 = nn.Linear(self.encoder_output_size, code_len)
+        self.fc22 = nn.Linear(self.encoder_output_size, code_len)
+        self.fc3 = nn.Linear(code_len, self.encoder_output_size)
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(16, hidden_size, 1, 1, 0),
+            nn.BatchNorm2d(hidden_size),
+            nn.ReLU(True),
+            nn.Conv2d(hidden_size, hidden_size, 1, 1, 0),
+            ResBlock(hidden_size),
+            nn.Conv2d(hidden_size, hidden_size, 1, 1, 0),
+            )
+        self.codebook = VQEmbedding(num_clusters, hidden_size)
+        self.decoder = nn.Sequential(
+                  ResBlock(hidden_size),
+                  ResBlock(hidden_size),
+                  nn.ConvTranspose2d(hidden_size, hidden_size, 4, 2, 1),
+                  nn.BatchNorm2d(hidden_size),
+                  nn.ReLU(True),
+                  nn.ConvTranspose2d(hidden_size, output_size, 4, 2, 1),
+                  )
+        self.apply(weights_init)
+
+    def reparameterize(self, mu, logvar):
+        if self.training:
+            std = torch.exp(0.5*logvar)
+            eps = torch.randn_like(std)
+            o = eps.mul(std).add_(mu)
+            return o
+        else:
+            return mu
+
+    def acn_encode(self, x):
+        o = self.encoder(x)
+        # output is 84,256,7,7 for mnist
+        o = o.view(o.shape[0], o.shape[1]*o.shape[2]*o.shape[3])
+        mu = self.fc21(o)
+        logvar =self.fc22(o)
+        z = self.reparameterize(mu, logvar)
+        return z, mu, logvar
+
+    def vq_encode(self, z):
+        # convert z to image shape
+        co = F.relu(self.fc3(z))
+        co = co.view(z.shape[0], 16, 7, 7)
+        z_e_x = self.conv_layers(co)
+        latents = self.codebook(z_e_x)
+        return z_e_x, latents
+
+    def forward(self, x):
+        z, mu, logvar = self.acn_encode(x)
+        z_e_x, latents = self.vq_encode(z)
+        z_q_x_st, z_q_x = self.codebook.straight_through(z_e_x)
+        x_tilde = self.decoder(z_q_x_st)
+        return x_tilde, z, mu, logvar, z_e_x, z_q_x, latents
+
 
 class VQVAE(nn.Module):
+     # reconstruction from this model is poor
     def __init__(self, input_size=1, output_size=1,
                        encoder_output_size=1000, last_layer_bias=0.5, num_clusters=512, num_z=32):
         super(VQVAE, self).__init__()
