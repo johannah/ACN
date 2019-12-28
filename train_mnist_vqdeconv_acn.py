@@ -34,7 +34,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import PriorNetwork, ACNVQVAEres
+from acn_models import PTPriorNetwork, ACNVQVAEres
 from IPython import embed
 
 
@@ -108,8 +108,10 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
                                num_z=info['num_z'],
                                ).to(info['device'])
 
-    prior_model = PriorNetwork(size_training_set=info['size_training_set'],
+    prior_model = PTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
+                              # code_length=info['code_length'], k=info['num_k']).to(info['device'])
+    prior_model.codes = prior_model.codes.to(info['device'])
     model_dict = {'vq_acn_model':vq_acn_model, 'prior_model':prior_model}
     parameters = []
     for name,model in model_dict.items():
@@ -142,13 +144,21 @@ def forward_pass(model_dict, data, label, batch_index, phase, info):
     bs,c,h,w = target.shape
     model_dict['opt'].zero_grad()
     data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
-    vq_dml, z, u_q, s_q, z_e_x, z_q_x, latents = model_dict['vq_acn_model'](data)
+    u_q = model_dict['vq_acn_model'](data)
+    #vq_dml, u_q, z_e_x, z_q_x, latents = model_dict['vq_acn_model'](data)
+    # log softmax is necessary for the kl distance calc
+    u_q_flat = u_q.view(bs, info['code_length'])
     if phase == 'train':
         # fit acn knn during training
-        model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
-        model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
-    u_p, s_p = model_dict['prior_model'](u_q)
-    return model_dict, data, target, z, u_q, s_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents
+        #model_dict['prior_model'].codes[batch_index] = u_q_flat.detach().cpu().numpy()
+        model_dict['prior_model'].update_codebook(batch_index, u_q_flat.detach())
+    z, u_p, s_p = model_dict['prior_model'](u_q_flat)
+    z = z.view(bs, 4, 7, 7)
+    u_p = u_p.view(bs, 4, 7, 7)
+    s_p = s_p.view(bs, 4, 7, 7)
+    vq_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
+    #return model_dict, data, target, u_q, u_p, vq_dml, z_e_x, z_q_x, latents
+    return model_dict, data, target, u_q,  u_p, s_p, vq_dml, z_e_x, z_q_x, latents
 
 def run(train_cnt, model_dict, data_dict, phase, info):
     st = time.time()
@@ -165,8 +175,17 @@ def run(train_cnt, model_dict, data_dict, phase, info):
     for idx, (data, label, batch_index) in enumerate(data_loader):
         bs,c,h,w = data.shape
         fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-        model_dict, data, target, z, u_q, s_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents = fp_out
-        kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
+        model_dict, data, target, u_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents = fp_out
+        #model_dict, data, target, z, u_q, s_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents = fp_out
+        #model_dict, data, target, u_q, u_p, vq_dml, z_e_x, z_q_x, latents = fp_out
+        #kl = kldis(lsm(u_q), sm(u_p))
+        if idx == 0:
+            log_ones = torch.zeros(bs, info['code_length']).to(info['device'])
+        elif bs != log_ones.shape[0]:
+            log_ones = torch.zeros(bs, info['code_length']).to(info['device'])
+        kl = kl_loss_function(u_q.view(bs, info['code_length']), log_ones,
+                              u_p.view(bs, info['code_length']), s_p.view(bs, info['code_length']),
+                              reduction=info['reduction'])
         vq_rec_loss = discretized_mix_logistic_loss(vq_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
         vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
         commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
@@ -302,6 +321,28 @@ def latent_walk(model_dict, data_dict, info):
             vwrite(mname, walk_video)
             print('finished %s'%mname)
 
+def call_pca_plot(model_dict, data_dict, info):
+    from utils import pca_plot
+    # always be in eval mode
+    model_dict = set_model_mode(model_dict, 'valid')
+    with torch.no_grad():
+        for phase in ['valid', 'train']:
+            data_loader = data_dict[phase]
+            for idx, (data, label, batch_index) in enumerate(data_loader):
+                fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+                model_dict, data, target, u_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents = fp_out
+                bs = data.shape[0]
+                u_q_flat = u_q.view(bs, info['code_length'])
+                X = u_q_flat.cpu().numpy()
+                color = label
+                images = target[:,0].cpu().numpy()
+                param_name = '_pca_%s.html'%(phase)
+                html_path = info['model_loadpath'].replace('.pt', param_name)
+                pca_plot(X=X, images=images, color=color,
+                          html_out_path=html_path, serve=False)
+                break
+
+
 def call_tsne_plot(model_dict, data_dict, info):
     from utils import tsne_plot
     # always be in eval mode
@@ -309,31 +350,15 @@ def call_tsne_plot(model_dict, data_dict, info):
     with torch.no_grad():
         for phase in ['valid', 'train']:
             data_loader = data_dict[phase]
-            for idx, (data, label, batch_idx) in enumerate(data_loader):
-                target = data = data.to(info['device'])
-                # yhat_batch is bt 0-1
-                yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
-                u_p, s_p = model_dict['prior_model'](u_q)
-                #yhat_batch = model_dict['conv_decoder'](z)
-                if info['rec_loss_type'] == 'bce':
-                    assert target.max() <=1
-                    assert target.min() >=0
-                    yhat_batch = torch.sigmoid(yhat_batch)
-                elif info['rec_loss_type'] == 'dml':
-                    assert target.max() <=1
-                    assert target.min() >=-1
-                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch, info['nr_logistic_mix'])
-                else:
-                    raise ValueError('invalid rec_loss_type')
-                X = u_q.cpu().numpy()
-                if info['use_pred']:
-                    images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
-                    T = 'pred'
-                else:
-                    images = target[:,0].cpu().numpy()
-                    T = 'target'
+            for idx, (data, label, batch_index) in enumerate(data_loader):
+                fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+                model_dict, data, target, u_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents = fp_out
+                bs = data.shape[0]
+                u_q_flat = u_q.view(bs, info['code_length'])
+                X = u_q_flat.cpu().numpy()
                 color = label
-                param_name = '_%s_P%s_%s.html'%(phase, info['perplexity'], T)
+                images = target[:,0].cpu().numpy()
+                param_name = '_tsne_%s_P%s.html'%(phase, info['perplexity'])
                 html_path = info['model_loadpath'].replace('.pt', param_name)
                 tsne_plot(X=X, images=images, color=color,
                           perplexity=info['perplexity'],
@@ -355,15 +380,15 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='vq_deconv_acn_res', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='debug_vq_deconv_acn_res_convthruout', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
     parser.add_argument('--nr_logistic_mix', default=10, type=int)
     # acn model setup
-    parser.add_argument('-cl', '--code_length', default=64, type=int)
+    parser.add_argument('-cl', '--code_length', default=196, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
-    parser.add_argument('--hidden_size', default=64, type=int)
+    parser.add_argument('--hidden_size', default=256, type=int)
 
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
@@ -379,6 +404,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_savedir', default='../model_savedir', help='save checkpoints here')
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # tsne info
+    parser.add_argument('--pca', action='store_true', default=False)
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=10, type=int, help='perplexity used in scikit-learn tsne call')
     parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
@@ -415,12 +441,17 @@ if __name__ == '__main__':
 
     info = create_new_info_dict(vars(args), base_filepath)
     model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, args.model_loadpath)
+    kldis = nn.KLDivLoss(reduction=info['reduction'])
+    lsm = nn.LogSoftmax(dim=1)
+    sm = nn.Softmax(dim=1)
     if args.tsne:
         call_tsne_plot(model_dict, data_dict, info)
+    if args.pca:
+        call_pca_plot(model_dict, data_dict, info)
     if args.walk:
         latent_walk(model_dict, data_dict, info)
     # only train if we weren't asked to do anything else
-    if not max([args.tsne, args.walk]):
+    if not max([args.tsne, args.pca, args.walk]):
         write_log_files(info)
         train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv)
 
