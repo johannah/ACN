@@ -566,6 +566,13 @@ class ACNVQVAEres(nn.Module):
                   )
         self.apply(weights_init)
 
+    def reparameterize(self, mu):
+        if self.training:
+            noise = torch.randn(mu.shape).to(mu.device)
+            return mu+noise
+        else:
+            return mu
+
     def vq_encode(self, mu):
         z_e_x = self.conv_layers(mu)
         latents = self.codebook(z_e_x)
@@ -573,7 +580,8 @@ class ACNVQVAEres(nn.Module):
 
     def forward(self, x):
         mu = self.encoder(x)
-        return mu
+        z = self.reparameterize(mu)
+        return z, mu
 
     def decode(self, z):
         z_e_x, latents = self.vq_encode(z)
@@ -618,13 +626,20 @@ class ACNres(nn.Module):
                   )
         self.apply(weights_init)
 
+    def reparameterize(self, mu):
+        if self.training:
+            noise = torch.randn(mu.shape).to(mu.device)
+            return mu+noise
+        else:
+            return mu
+
     def decode(self, z):
         return self.decoder(z)
 
     def forward(self, x):
         mu = self.encoder(x)
-        return mu
-
+        z = self.reparameterize(mu)
+        return z, mu
 
 class VQVAE(nn.Module):
      # reconstruction from this model is poor
@@ -726,40 +741,6 @@ class VQVAE(nn.Module):
         x_tilde = self.decoder(z_q_x_st)
         return x_tilde, z_e_x, z_q_x, latents
 
-
-#    def vq_decode(self, z_e_x):
-#        # NCHW is the order in the encoder
-#        # (num, channels, height, width)
-#        N, C, H, W = z_e_x.shape
-#        # need NHWC instead of default NCHW for easier computations
-#        z_e_x_transposed = z_e_x.permute(0,2,3,1)
-#        # needs C,K
-#        emb = self.embedding.weight.transpose(0,1)
-#        # broadcast to determine distance from encoder output to clusters
-#        # NHWC -> NHWCK
-#        measure = z_e_x_transposed.unsqueeze(4) - emb[None, None, None]
-#        # num_clusters=512, num_z=64
-#        # measure is of shape bs,10,10,64,512
-#        # square each element, then sum over channels
-#        # take sum over each z - find min
-#        dists = torch.pow(measure, 2).sum(-2)
-#        # pytorch gives real min and arg min - select argmin
-#        # this is the closest k for each sample - Equation 1
-#        # latents is a array of integers
-#        # mnist latents are size bs,4,4
-#        latents = dists.min(-1)[1]
-#        # look up cluster centers
-#        x_tilde, z_q_x = self.decode_clusters(latents, N, H, W, C)
-#        return x_tilde, z_q_x, latents
-#
-#    def decode_clusters(self, latents, N, H, W, C):
-#        z_q_x = self.embedding(latents.view(latents.shape[0], -1))
-#        # back to NCHW (orig) - now cluster centers/class
-#        z_q_x = z_q_x.view(N, H, W, C).permute(0, 3, 1, 2)
-#        # put quantized data through decoder
-#        x_tilde = self.decoder(z_q_x)
-#        return x_tilde, z_q_x
-
 class PTPriorNetwork(nn.Module):
     def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):
         super(PTPriorNetwork, self).__init__()
@@ -770,9 +751,6 @@ class PTPriorNetwork(nn.Module):
         self.fc1 = nn.Linear(self.code_length, n_hidden)
         self.fc2_u = nn.Linear(n_hidden, self.code_length)
         self.fc2_s = nn.Linear(n_hidden, self.code_length)
-
-        #self.knn = KNeighborsClassifier(n_neighbors=self.k, n_jobs=-1)
-        # codes are initialized randomly - Alg 1: initialize C: c(x)~N(0,1)
         self.codes = torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length)))
         batch_size = 64
         n_neighbors = 5
@@ -818,8 +796,6 @@ class PTPriorNetwork(nn.Module):
             chosen_neighbor_index = torch.LongTensor(self.rdn.randint(0,neighbor_indexes.shape[1],size=bsize))
         else:
             chosen_neighbor_index = torch.LongTensor(torch.zeros(bsize, dtype=torch.int64))
-
-
         return self.codes[neighbor_indexes[self.batch_indexer, chosen_neighbor_index]]
 
     def forward(self, codes):
@@ -830,10 +806,7 @@ class PTPriorNetwork(nn.Module):
         h1 = F.relu(self.fc1(prev_code))
         mu = self.fc2_u(h1)
         logstd = self.fc2_s(h1)
-        z = mu
-        if self.training:
-            z = z + logstd.mul(0.5).exp() * torch.randn_like(z)
-        return z, mu, logstd
+        return mu, logstd
 
 class PriorNetwork(nn.Module):
     def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):

@@ -141,13 +141,12 @@ def forward_pass(model_dict, data, label, batch_index, phase, info):
     bs,c,h,w = target.shape
     model_dict['opt'].zero_grad()
     data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
-    u_q = model_dict['acn_model'](data)
+    z, u_q = model_dict['acn_model'](data)
     u_q_flat = u_q.view(bs, info['code_length'])
     if phase == 'train':
         # fit acn knn during training
         model_dict['prior_model'].update_codebook(batch_index, u_q_flat.detach())
-    z, u_p, s_p = model_dict['prior_model'](u_q_flat)
-    z = z.view(bs, 4, 7, 7)
+    u_p, s_p = model_dict['prior_model'](u_q_flat)
     u_p = u_p.view(bs, 4, 7, 7)
     s_p = s_p.view(bs, 4, 7, 7)
     rec_dml =  model_dict['acn_model'].decode(z)
@@ -370,7 +369,7 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='deconv_acn_res_convthruout', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='deconv_acn_res_convthruout_repq', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
