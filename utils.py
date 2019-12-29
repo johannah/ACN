@@ -247,33 +247,18 @@ def tsne_plot(X, images, color, perplexity=5, serve_port=8104, html_out_path='mp
 
 def set_model_mode(model_dict, phase):
     for name, model in model_dict.items():
-        print('setting', name, phase)
         if name != 'opt':
+            #print('setting', name, phase)
             if phase == 'valid':
                 model_dict[name].eval()
             else:
                 model_dict[name].train()
     return model_dict
 
-
-def kl_loss_function_over_means(u_q, u_p, reduction='sum'):
-    ''' reconstruction loss + coding cost
-     coding cost is the KL divergence bt posterior and conditional prior
-     All inputs are
-     Args:
-         u_q: mean of model posterior
-         u_p: mean of conditional prior
-
-     Returns: loss
-     '''
-    acn_KLD = (u_q-u_p).pow(2)
-    acn_KLD = acn_KLD.sum(dim=-1).sum(dim=-1).sum(dim=-1)
-    if reduction == 'sum':
-        return acn_KLD.sum()
-    elif reduction == 'mean':
-        return acn_KLD.mean()
-    else:
-        raise ValueError('invalid kl reduction')
+def kl_normal(mu_0, log_var_0, mu_1, log_var_1):
+    # from https://gist.github.com/Kaixhin/9c90221aae216f59ca2594ea000b0afe
+    kl = (2 * (log_var_1 - log_var_0)).exp() + ((mu_1 - mu_0) / log_var_0.exp()) ** 2 - 2 * (log_var_1 - log_var_0) - 1
+    return 0.5 * kl.sum(1).mean()
 
 def kl_loss_function(u_q, s_q, u_p, s_p, reduction='sum'):
     ''' reconstruction loss + coding cost

@@ -741,6 +741,110 @@ class VQVAE(nn.Module):
         x_tilde = self.decoder(z_q_x_st)
         return x_tilde, z_e_x, z_q_x, latents
 
+class tPTPriorNetwork(nn.Module):
+    def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):
+        super(tPTPriorNetwork, self).__init__()
+        self.rdn = np.random.RandomState(random_seed)
+        self.k = k
+        self.size_training_set = size_training_set
+        self.code_length = code_length
+        self.input_layer = nn.Linear(code_length, n_hidden)
+        self.skipin_to_2 = nn.Linear(n_hidden, n_hidden)
+        self.skipin_to_3 = nn.Linear(n_hidden, n_hidden)
+        self.skip1_to_out = nn.Linear(n_hidden, n_hidden)
+        self.skip2_to_out = nn.Linear(n_hidden, n_hidden)
+        self.h1 = nn.Linear(n_hidden, n_hidden)
+        self.h2 = nn.Linear(n_hidden, n_hidden)
+        self.h3 = nn.Linear(n_hidden, n_hidden)
+        self.fc_mu = nn.Linear(n_hidden, self.code_length)
+        self.fc_s = nn.Linear(n_hidden, self.code_length)
+
+        self.codes = torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length)))
+        batch_size = 64
+        n_neighbors = 5
+        self.neighbors = torch.LongTensor((batch_size, n_neighbors))
+        self.distances = torch.FloatTensor((batch_size, n_neighbors))
+        self.batch_indexer = torch.LongTensor(torch.arange(batch_size))
+
+    def update_codebook(self, indexes, values):
+        self.codes[indexes] = values
+
+    def kneighbors(self, test, n_neighbors):
+        with torch.no_grad():
+            device = test.device
+            bs = test.shape[0]
+            return_size = (bs,n_neighbors)
+            # dont recreate unless necessary
+            if self.neighbors.shape != return_size:
+                print('updating prior sizes')
+                self.neighbors = torch.LongTensor(torch.zeros(return_size, dtype=torch.int64))
+                self.distances = torch.zeros(return_size)
+                self.batch_indexer = torch.LongTensor(torch.arange(bs))
+            if device != self.codes.device:
+                print('transferring prior to %s'%device)
+                self.neighbors = self.neighbors.to(device)
+                self.distances = self.distances.to(device)
+                self.codes = self.codes.to(device)
+
+            for bidx in range(test.shape[0]):
+                dists = torch.norm(self.codes-test[bidx], dim=1)
+                self.distances[bidx], self.neighbors[bidx] = dists.topk(n_neighbors, largest=False)
+                del dists
+        #print('kn', bidx, torch.cuda.memory_allocated(device=None))
+        return self.distances.detach(), self.neighbors.detach()
+
+    def batch_pick_close_neighbor(self, codes):
+        '''
+        :code latent activation of training
+        '''
+        neighbor_distances, neighbor_indexes = self.kneighbors(codes, n_neighbors=self.k)
+        bsize = neighbor_indexes.shape[0]
+        if self.training:
+            # randomly choose neighbor index from top k
+            #print('************ training - random neighbor')
+            chosen_neighbor_index = torch.LongTensor(self.rdn.randint(0,neighbor_indexes.shape[1],size=bsize))
+        else:
+            chosen_neighbor_index = torch.LongTensor(torch.zeros(bsize, dtype=torch.int64))
+        return self.codes[neighbor_indexes[self.batch_indexer, chosen_neighbor_index]]
+
+    def forward(self, codes):
+        previous_codes = self.batch_pick_close_neighbor(codes)
+        return self.encode(previous_codes)
+
+    def encode(self, prev_code):
+        """
+        The prior network was an
+        MLP with three hidden layers each containing 512 tanh
+        units
+        - and skip connections from the input to all hidden
+        layers and
+        - all hiddens to the output layer.
+        """
+        i = F.tanh(self.input_layer(prev_code))
+        # input goes through first hidden layer
+        _h1 = F.tanh(self.h1(i))
+
+        # make a skip connection for h layers 2 and 3
+        _s2 = F.tanh(self.skipin_to_2(_h1))
+        _s3 = F.tanh(self.skipin_to_3(_h1))
+
+        # h layer 2 takes in the output from the first hidden layer and the skip
+        # connection
+        _h2 = F.tanh(self.h2(_h1+_s2))
+
+        # take skip connection from h1 and h2 for output
+        _o1 = F.tanh(self.skip1_to_out(_h1))
+        _o2 = F.tanh(self.skip2_to_out(_h2))
+        # h layer 3 takes skip connection from prev layer and skip connection
+        # from nput
+        _o3 = F.tanh(self.h3(_h2+_s3))
+
+        out = _o1+_o2+_o3
+        mu = self.fc_mu(out)
+        logstd = self.fc_s(out)
+        return mu, logstd
+
+
 class PTPriorNetwork(nn.Module):
     def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):
         super(PTPriorNetwork, self).__init__()
@@ -793,6 +897,7 @@ class PTPriorNetwork(nn.Module):
         bsize = neighbor_indexes.shape[0]
         if self.training:
             # randomly choose neighbor index from top k
+            print('************ training - random neighbor')
             chosen_neighbor_index = torch.LongTensor(self.rdn.randint(0,neighbor_indexes.shape[1],size=bsize))
         else:
             chosen_neighbor_index = torch.LongTensor(torch.zeros(bsize, dtype=torch.int64))
@@ -806,6 +911,9 @@ class PTPriorNetwork(nn.Module):
         h1 = F.relu(self.fc1(prev_code))
         mu = self.fc2_u(h1)
         logstd = self.fc2_s(h1)
+        # logstd is trained with noise added to the the prev_code so it does not
+        # perform well when the prev_code is passed a prev_code with no noise
+        # (ie .eval() on the encoder model)
         return mu, logstd
 
 class PriorNetwork(nn.Module):
