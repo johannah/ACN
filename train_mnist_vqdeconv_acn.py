@@ -262,6 +262,14 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                         info['valid_losses'], name=plot_filepath, rolling_length=1)
 
 
+def daydream(model_dict, data_dict, info):
+    from skvideo.io import vwrite
+    model_dict = set_model_mode(model_dict, 'valid')
+    output_savepath = args.model_loadpath.replace('.pt', '')
+    phase = 'train'
+    data_loader = data_dict[phase]
+
+
 def latent_walk(model_dict, data_dict, info):
     from skvideo.io import vwrite
     model_dict = set_model_mode(model_dict, 'valid')

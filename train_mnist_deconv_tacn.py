@@ -34,7 +34,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import PTPriorNetwork, ACNres
+from acn_models import tPTPriorNetwork, ACNres
 from IPython import embed
 
 
@@ -106,7 +106,7 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
                                hidden_size=info['hidden_size'],
                                ).to(info['device'])
 
-    prior_model = PTPriorNetwork(size_training_set=info['size_training_set'],
+    prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
     prior_model.codes = prior_model.codes.to(info['device'])
     model_dict = {'acn_model':acn_model, 'prior_model':prior_model}
@@ -431,7 +431,7 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='deconv_acn_res_convthruout_repq', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='deconv_acn_res_convthruout_repq_bigprior', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
