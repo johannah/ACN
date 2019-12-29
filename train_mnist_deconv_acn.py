@@ -120,6 +120,7 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     if args.model_loadpath !='':
        for name,model in model_dict.items():
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
+            print("LOADING WEIGHTS FROM", name)
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 def account_losses(loss_dict):
@@ -319,7 +320,7 @@ def daydream(model_dict, data_dict, info):
             f,ax = plt.subplots(num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, num_examples))
             # always set phase == train because the prior model was trained
             # with noise added and will not perform with input without noise
-            model_dict = set_model_mode(model_dict, phase=phase)
+            model_dict = set_model_mode(model_dict, phase='valid')
             target = data = data[:num_examples].to(info['device'])
             z, u_q = model_dict['acn_model'](data)
             rec_dml =  model_dict['acn_model'].decode(z)
@@ -331,21 +332,17 @@ def daydream(model_dict, data_dict, info):
             cnt = 0
             _,c,h,w = target.shape
             out_video = np.ones((args.num_compare*num_examples, h, w*2))
+            # go through each item in example to get samples
             for ii in range(num_examples):
-                one_u_q = u_q[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
+                one_u_q = u_q[ii][None]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
                 one_u_q_flat = one_u_q.view(args.num_compare, info['code_length'])
-                one_u_p_flat, one_s_p_flat = model_dict['prior_model'](one_u_q_flat)
-                print(one_u_p_flat.min(), one_u_p_flat.max())
-                print(one_u_q_flat.min(), one_u_q_flat.max())
+                # should be forward - but i didn't save codes in old model
+                one_u_p_flat, one_s_p_flat = model_dict['prior_model'].encode(one_u_q_flat)
                 # now we have several comparisons from this example
                 # s_p is logsigma
                 # 0.5 multiplier bc we parameterize the std dev not var -
                 # see kld calculation - which is what defines std vs var
-                if not ii%2:
-                    print("sampling from prior does not work - using mean for example")
-                    z_flat = one_u_q_flat+torch.exp(0.5*one_s_p_flat)*torch.randn(one_s_p_flat.shape).to(info['device'])
-                else:
-                    z_flat = one_u_p_flat+torch.exp(0.5*one_s_p_flat)*torch.randn(one_s_p_flat.shape).to(info['device'])
+                z_flat = one_u_p_flat+torch.exp(0.5*one_s_p_flat)*torch.randn(one_s_p_flat.shape).to(info['device'])
                 z = z_flat.view(args.num_compare, 4, 7, 7)
                 srec_dml =  model_dict['acn_model'].decode(z)
                 syhat = sample_from_discretized_mix_logistic(srec_dml, info['nr_logistic_mix'], only_mean=True)

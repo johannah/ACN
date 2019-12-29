@@ -759,7 +759,8 @@ class tPTPriorNetwork(nn.Module):
         self.fc_mu = nn.Linear(n_hidden, self.code_length)
         self.fc_s = nn.Linear(n_hidden, self.code_length)
 
-        self.codes = torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length)))
+        # needs to be a param so that we can load
+        self.codes = nn.Parameter(torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length))), requires_grad=False)
         batch_size = 64
         n_neighbors = 5
         self.neighbors = torch.LongTensor((batch_size, n_neighbors))
@@ -820,24 +821,24 @@ class tPTPriorNetwork(nn.Module):
         layers and
         - all hiddens to the output layer.
         """
-        i = F.tanh(self.input_layer(prev_code))
+        i = torch.tanh(self.input_layer(prev_code))
         # input goes through first hidden layer
-        _h1 = F.tanh(self.h1(i))
+        _h1 = torch.tanh(self.h1(i))
 
         # make a skip connection for h layers 2 and 3
-        _s2 = F.tanh(self.skipin_to_2(_h1))
-        _s3 = F.tanh(self.skipin_to_3(_h1))
+        _s2 = torch.tanh(self.skipin_to_2(_h1))
+        _s3 = torch.tanh(self.skipin_to_3(_h1))
 
         # h layer 2 takes in the output from the first hidden layer and the skip
         # connection
-        _h2 = F.tanh(self.h2(_h1+_s2))
+        _h2 = torch.tanh(self.h2(_h1+_s2))
 
         # take skip connection from h1 and h2 for output
-        _o1 = F.tanh(self.skip1_to_out(_h1))
-        _o2 = F.tanh(self.skip2_to_out(_h2))
+        _o1 = torch.tanh(self.skip1_to_out(_h1))
+        _o2 = torch.tanh(self.skip2_to_out(_h2))
         # h layer 3 takes skip connection from prev layer and skip connection
         # from nput
-        _o3 = F.tanh(self.h3(_h2+_s3))
+        _o3 = torch.tanh(self.h3(_h2+_s3))
 
         out = _o1+_o2+_o3
         mu = self.fc_mu(out)
@@ -855,6 +856,7 @@ class PTPriorNetwork(nn.Module):
         self.fc1 = nn.Linear(self.code_length, n_hidden)
         self.fc2_u = nn.Linear(n_hidden, self.code_length)
         self.fc2_s = nn.Linear(n_hidden, self.code_length)
+        #self.codes = nn.Parameter(torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length))))
         self.codes = torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length)))
         batch_size = 64
         n_neighbors = 5
@@ -916,58 +918,59 @@ class PTPriorNetwork(nn.Module):
         # (ie .eval() on the encoder model)
         return mu, logstd
 
-class PriorNetwork(nn.Module):
-    def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):
-        super(PriorNetwork, self).__init__()
-        self.rdn = np.random.RandomState(random_seed)
-        self.k = k
-        self.size_training_set = size_training_set
-        self.code_length = code_length
-        self.fc1 = nn.Linear(self.code_length, n_hidden)
-        self.fc2_u = nn.Linear(n_hidden, self.code_length)
-        self.fc2_s = nn.Linear(n_hidden, self.code_length)
-
-        self.knn = KNeighborsClassifier(n_neighbors=self.k, n_jobs=-1)
-        # codes are initialized randomly - Alg 1: initialize C: c(x)~N(0,1)
-        codes = self.rdn.standard_normal((self.size_training_set, self.code_length))
-        self.fit_knn(codes)
-
-    def fit_knn(self, codes):
-        ''' will reset the knn  given an nd array
-        '''
-        self.codes = codes
-        y = np.zeros((len(self.codes)))
-        self.knn.fit(self.codes, y)
-
-    def batch_pick_close_neighbor(self, codes):
-        '''
-        :code latent activation of training example as np
-        '''
-        neighbor_distances, neighbor_indexes = self.knn.kneighbors(codes, n_neighbors=self.k, return_distance=True)
-        bsize = neighbor_indexes.shape[0]
-        if self.training:
-            # randomly choose neighbor index from top k
-            chosen_neighbor_index = self.rdn.randint(0,neighbor_indexes.shape[1],size=bsize)
-        else:
-            chosen_neighbor_index = np.zeros((bsize), dtype=np.int)
-        return self.codes[neighbor_indexes[np.arange(bsize), chosen_neighbor_index]]
-
-    def forward(self, codes):
-        device = codes.device
-        np_codes = codes.cpu().detach().numpy()
-        previous_codes = self.batch_pick_close_neighbor(np_codes)
-        previous_codes = torch.FloatTensor(previous_codes).to(device)
-        return self.encode(previous_codes)
-
-    #def encode(self, prev_code):
-    #    h1 = F.relu(self.fc1(prev_code))
-    #    mu = self.fc2_u(h1)
-    #    return mu
-
-    def encode(self, prev_code):
-        h1 = F.relu(self.fc1(prev_code))
-        mu = self.fc2_u(h1)
-        logstd = self.fc2_s(h1)
-        return mu, logstd
+#class PriorNetwork(nn.Module):
+#    def __init__(self, size_training_set, code_length, n_hidden=512, k=5, random_seed=4543):
+#        super(PriorNetwork, self).__init__()
+#        self.rdn = np.random.RandomState(random_seed)
+#        self.k = k
+#        self.size_training_set = size_training_set
+#        self.code_length = code_length
+#        self.fc1 = nn.Linear(self.code_length, n_hidden)
+#        self.fc2_u = nn.Linear(n_hidden, self.code_length)
+#        self.fc2_s = nn.Linear(n_hidden, self.code_length)
+#
+#        self.knn = KNeighborsClassifier(n_neighbors=self.k, n_jobs=-1)
+#        # codes are initialized randomly - Alg 1: initialize C: c(x)~N(0,1)
+#        #
+#        codes = self.rdn.standard_normal((self.size_training_set, self.code_length))
+#        self.fit_knn(codes)
+#
+#    def fit_knn(self, codes):
+#        ''' will reset the knn  given an nd array
+#        '''
+#        self.codes = codes
+#        y = np.zeros((len(self.codes)))
+#        self.knn.fit(self.codes, y)
+#
+#    def batch_pick_close_neighbor(self, codes):
+#        '''
+#        :code latent activation of training example as np
+#        '''
+#        neighbor_distances, neighbor_indexes = self.knn.kneighbors(codes, n_neighbors=self.k, return_distance=True)
+#        bsize = neighbor_indexes.shape[0]
+#        if self.training:
+#            # randomly choose neighbor index from top k
+#            chosen_neighbor_index = self.rdn.randint(0,neighbor_indexes.shape[1],size=bsize)
+#        else:
+#            chosen_neighbor_index = np.zeros((bsize), dtype=np.int)
+#        return self.codes[neighbor_indexes[np.arange(bsize), chosen_neighbor_index]]
+#
+#    def forward(self, codes):
+#        device = codes.device
+#        np_codes = codes.cpu().detach().numpy()
+#        previous_codes = self.batch_pick_close_neighbor(np_codes)
+#        previous_codes = torch.FloatTensor(previous_codes).to(device)
+#        return self.encode(previous_codes)
+#
+#    #def encode(self, prev_code):
+#    #    h1 = F.relu(self.fc1(prev_code))
+#    #    mu = self.fc2_u(h1)
+#    #    return mu
+#
+#    def encode(self, prev_code):
+#        h1 = F.relu(self.fc1(prev_code))
+#        mu = self.fc2_u(h1)
+#        logstd = self.fc2_s(h1)
+#        return mu, logstd
 
 
