@@ -307,7 +307,6 @@ def daydream(model_dict, data_dict, info):
     import matplotlib.transforms as mtrans
     from skvideo.io import vwrite
     # always be in eval mode
-    num_examples = 10
     with torch.no_grad():
         for phase in ['train', 'valid']:
             data_loader = data_dict[phase]
@@ -316,13 +315,16 @@ def daydream(model_dict, data_dict, info):
             # only run data loader once
             plt_path = info['model_loadpath'].replace('.pt', '_%s_debug_daydream.png'%phase)
             mv_path = info['model_loadpath'].replace('.pt', '_%s_debug_daydream.mp4'%phase)
-            f,ax = plt.subplots(num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, num_examples))
+            f,ax = plt.subplots(args.num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, args.num_examples))
             # always set phase == train because the prior model was trained
             # with noise added and will not perform with input without noise
             model_dict = set_model_mode(model_dict, phase=phase)
-            target = data = data[:num_examples].to(info['device'])
+            target = data = data[:args.num_examples].to(info['device'])
             z, u_q = model_dict['acn_model'](data)
             rec_dml =  model_dict['acn_model'].decode(z)
+            u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
+            u_p = u_p_flat.view(args.num_examples, 4, 7, 7)
+            s_p = s_p_flat.view(args.num_examples, 4, 7, 7)
 
             # get data for plotting later
             exyhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=True)
@@ -330,23 +332,17 @@ def daydream(model_dict, data_dict, info):
             nptarget = target.cpu().detach().numpy()
             cnt = 0
             _,c,h,w = target.shape
-            out_video = np.ones((args.num_compare*num_examples, h, w*2))
-            for ii in range(num_examples):
-                one_u_q = u_q[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
-                one_u_q_flat = one_u_q.view(args.num_compare, info['code_length'])
-                one_u_p_flat, one_s_p_flat = model_dict['prior_model'](one_u_q_flat)
-                print(one_u_p_flat.min(), one_u_p_flat.max())
-                print(one_u_q_flat.min(), one_u_q_flat.max())
+            out_video = np.ones((args.num_compare*args.num_examples, h, w*2))
+            for ii in range(args.num_examples):
+                one_u_p = u_p[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
+                one_s_p = s_p[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
+                print(u_p[ii].min(), u_p[ii].max())
+                print(u_q[ii].min(), u_q[ii].max())
                 # now we have several comparisons from this example
                 # s_p is logsigma
                 # 0.5 multiplier bc we parameterize the std dev not var -
                 # see kld calculation - which is what defines std vs var
-                if not ii%2:
-                    print("sampling from prior does not work - using mean for example")
-                    z_flat = one_u_q_flat+torch.exp(0.5*one_s_p_flat)*torch.randn(one_s_p_flat.shape).to(info['device'])
-                else:
-                    z_flat = one_u_p_flat+torch.exp(0.5*one_s_p_flat)*torch.randn(one_s_p_flat.shape).to(info['device'])
-                z = z_flat.view(args.num_compare, 4, 7, 7)
+                z = one_u_p+torch.exp(0.5*one_s_p)*torch.randn(one_s_p.shape).to(info['device'])
                 srec_dml =  model_dict['acn_model'].decode(z)
                 syhat = sample_from_discretized_mix_logistic(srec_dml, info['nr_logistic_mix'], only_mean=True)
                 npyhat = syhat.cpu().detach().numpy()
@@ -457,6 +453,7 @@ if __name__ == '__main__':
     # daydream
     parser.add_argument('-dd', '--daydream', action='store_true', default=False)
     parser.add_argument('-nc', '--num_compare', default=20, type=int, help='number of comparisons to daydream from prior')
+    parser.add_argument('-nx', '--num_examples', default=10, type=int, help='number of examples to daydream from prior')
     # walk-thru
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
     parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
