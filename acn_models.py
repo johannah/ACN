@@ -899,7 +899,7 @@ class PTPriorNetwork(nn.Module):
         bsize = neighbor_indexes.shape[0]
         if self.training:
             # randomly choose neighbor index from top k
-            print('************ training - random neighbor')
+            #print('************ training - random neighbor')
             chosen_neighbor_index = torch.LongTensor(self.rdn.randint(0,neighbor_indexes.shape[1],size=bsize))
         else:
             chosen_neighbor_index = torch.LongTensor(torch.zeros(bsize, dtype=torch.int64))
