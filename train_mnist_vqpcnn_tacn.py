@@ -197,7 +197,7 @@ def run(train_cnt, model_dict, data_dict, phase, info):
         commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
         commit_loss *= info['vq_commitment_beta']
 
-        loss = kl+rec_loss+pcnn_loss
+        loss = kl+rec_loss+pcnn_loss+commit_loss+vq_loss
         loss_dict['running']+=bs
         loss_dict['loss']+=loss.item()
         loss_dict['kl']+= kl.item()
