@@ -94,12 +94,15 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
 
     # setup models
     # acn prior with vqvae embedding
-    acn_model = ACNres(code_len=info['code_length'],
+    vq_acn_model = ACNVQVAEres(code_len=info['code_length'],
                                input_size=info['input_channels'],
                                output_size=info['output_dim'],
                                encoder_output_size=info['encoder_output_size'],
                                hidden_size=info['hidden_size'],
+                               num_clusters=info['num_vqk'],
+                               num_z=info['num_z'],
                                ).to(info['device'])
+
 
     prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
@@ -118,7 +121,7 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
                                  output_projection_size=info['output_projection_size']).to(info['device'])
 
 
-    model_dict = {'acn_model':acn_model, 'prior_model':prior_model, 'pcnn_decoder_model':pcnn_decoder}
+    model_dict = {'vq_acn_model':vq_acn_model, 'prior_model':prior_model, 'pcnn_decoder_model':pcnn_decoder}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -151,26 +154,28 @@ def forward_pass(model_dict, data, label, batch_index, phase, info):
     bs,c,h,w = target.shape
     model_dict['opt'].zero_grad()
     data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
-    z, u_q = model_dict['acn_model'](data)
+    z, u_q = model_dict['vq_acn_model'](data)
     u_q_flat = u_q.view(bs, info['code_length'])
     z_flat = z.view(bs, info['code_length'])
     if phase == 'train':
         # fit acn knn during training
         model_dict['prior_model'].update_codebook(batch_index, u_q_flat.detach())
-    rec_dml =  model_dict['acn_model'].decode(z)
-    rec_yhat = sample_from_discretized_mix_logistic(rec_dml.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
-    pcnn_dml = model_dict['pcnn_decoder_model'](x=data, float_condition=z_flat, spatial_condition=rec_yhat)
     u_p, s_p = model_dict['prior_model'](u_q_flat)
     u_p = u_p.view(bs, 4, 7, 7)
     s_p = s_p.view(bs, 4, 7, 7)
-    return model_dict, data, target, u_q, u_p, s_p, rec_dml, rec_yhat, pcnn_dml
+    rec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
+    rec_yhat = sample_from_discretized_mix_logistic(rec_dml.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+    pcnn_dml = model_dict['pcnn_decoder_model'](x=data, float_condition=z_flat, spatial_condition=rec_yhat)
+    return model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml
 
 def run(train_cnt, model_dict, data_dict, phase, info):
     st = time.time()
     loss_dict = {'running': 0,
              'kl':0,
-             'rec_%s'%info['rec_loss_type']:0,
+             'vq_%s'%info['rec_loss_type']:0,
              'pcnn_%s'%info['rec_loss_type']:0,
+             'vq':0,
+             'commit':0,
              'loss':0,
               }
     data_loader = data_dict[phase]
@@ -178,7 +183,7 @@ def run(train_cnt, model_dict, data_dict, phase, info):
     for idx, (data, label, batch_index) in enumerate(data_loader):
         bs,c,h,w = data.shape
         fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-        model_dict, data, target, u_q, u_p, s_p, rec_dml, rec_yhat, pcnn_dml = fp_out
+        model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml = fp_out
         if idx == 0:
             log_ones = torch.zeros(bs, info['code_length']).to(info['device'])
         if bs != log_ones.shape[0]:
@@ -188,12 +193,19 @@ def run(train_cnt, model_dict, data_dict, phase, info):
                               reduction=info['reduction'])
         rec_loss = discretized_mix_logistic_loss(rec_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
         pcnn_loss = discretized_mix_logistic_loss(pcnn_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+        vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
+        commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
+        commit_loss *= info['vq_commitment_beta']
+
         loss = kl+rec_loss+pcnn_loss
         loss_dict['running']+=bs
         loss_dict['loss']+=loss.item()
         loss_dict['kl']+= kl.item()
-        loss_dict['rec_%s'%info['rec_loss_type']]+=rec_loss.item()
+        loss_dict['vq_%s'%info['rec_loss_type']]+=rec_loss.item()
         loss_dict['pcnn_%s'%info['rec_loss_type']]+=pcnn_loss.item()
+        loss_dict['vq']+= vq_loss.item()
+        loss_dict['commit']+= commit_loss.item()
+
         if phase == 'train':
             model_dict = clip_parameters(model_dict)
             loss.backward()
@@ -204,7 +216,7 @@ def run(train_cnt, model_dict, data_dict, phase, info):
             pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
             example = {'data':rescale_inv(data.detach().cpu()),
                        'target':rescale_inv(target.detach().cpu()),
-                       'deconv_yhat':rescale_inv(rec_yhat.detach().cpu()),
+                       'vq_yhat':rescale_inv(rec_yhat.detach().cpu()),
                        'pcnn_yhat':rescale_inv(pcnn_yhat.detach().cpu()),
                        }
         if not idx % 10:
@@ -550,7 +562,7 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_deconv_acn_res_convthruout_repq_bigprior', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='pcnn_vqdeconv_acn_res_convthruout_repq_bigprior', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
@@ -564,6 +576,10 @@ if __name__ == '__main__':
     parser.add_argument('-cl', '--code_length', default=196, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
     parser.add_argument('--hidden_size', default=256, type=int)
+    # vq model setup
+    parser.add_argument('--vq_commitment_beta', default=0.25, help='scale for loss 3 in vqvae - how hard to enforce commitment to cluster')
+    parser.add_argument('--num_vqk', default=512, type=int)
+    parser.add_argument('--num_z', default=64, type=int)
 
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
