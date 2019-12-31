@@ -108,7 +108,7 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
                                num_z=info['num_z'],
                                ).to(info['device'])
 
-    prior_model = PTPriorNetwork(size_training_set=info['size_training_set'],
+    prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
                               # code_length=info['code_length'], k=info['num_k']).to(info['device'])
     prior_model.codes = prior_model.codes.to(info['device'])
