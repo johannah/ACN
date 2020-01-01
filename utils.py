@@ -154,7 +154,55 @@ def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', 
     plt.savefig(name)
     plt.close()
 
-def tsne_plot(X, images, color, num_clusters=30, perplexity=5, serve_port=8104, html_out_path='mpld3.html', serve=False):
+
+def pca_plot(X, images, color, serve_port=8104, html_out_path='mpld3.html', serve=False):
+    from sklearn.decomposition import PCA
+    import mpld3
+    from skimage.transform import resize
+
+    print('computing pca')
+    Xpca = PCA(n_components=2).fit_transform(X)
+    x = Xpca[:,0]
+    y = Xpca[:,1]
+    # get color from kmeans cluster
+    #print('computing KMeans clustering')
+    #Xclust = KMeans(n_clusters=num_clusters).fit_predict(Xtsne)
+    #c = Xclust
+    # Create list of image URIs
+    html_imgs = []
+    print('adding hover images')
+    for nidx in range(images.shape[0]):
+        f,ax = plt.subplots()
+        ax.imshow(resize(images[nidx], (180,180)))
+        dd = mpld3.fig_to_dict(f)
+        img = dd['axes'][0]['images'][0]['data']
+        html = '<img src="data:image/png;base64,{0}">'.format(img)
+        html_imgs.append(html)
+        plt.close()
+
+    # Define figure and axes, hold on to object since they're needed by mpld3
+    fig, ax = plt.subplots(figsize=(8,8))
+    # Make scatterplot and label axes, title
+    sc = ax.scatter(x, y, s=100,alpha=0.7, c=color, edgecolors='none')
+    plt.title("PCA")
+    # Create the mpld3 HTML tooltip plugin
+    tooltip = mpld3.plugins.PointHTMLTooltip(sc, html_imgs)
+    # Connect the plugin to the matplotlib figure
+    mpld3.plugins.connect(fig, tooltip)
+    #plugins.connect(fig, plugins.Reset(), plugins.BoxZoom(), plugins.Zoom())
+    # Uncomment to save figure to html file
+    out=mpld3.fig_to_html(fig)
+    print('writing pca image to %s'%html_out_path)
+    fpath = open(html_out_path, 'w')
+    fpath.write(out)
+    # display is used in jupyter
+    #mpld3.display()
+    if serve==True:
+        mpld3.show(port=serve_port, open_browser=False)
+
+
+
+def tsne_plot(X, images, color, perplexity=5, serve_port=8104, html_out_path='mpld3.html', serve=False):
     from sklearn.manifold import TSNE
     import mpld3
     from skimage.transform import resize
@@ -163,10 +211,6 @@ def tsne_plot(X, images, color, num_clusters=30, perplexity=5, serve_port=8104, 
     Xtsne = TSNE(n_components=2, perplexity=perplexity).fit_transform(X)
     x = Xtsne[:,0]
     y = Xtsne[:,1]
-    # get color from kmeans cluster
-    #print('computing KMeans clustering')
-    #Xclust = KMeans(n_clusters=num_clusters).fit_predict(Xtsne)
-    #c = Xclust
     # Create list of image URIs
     html_imgs = []
     print('adding hover images')
@@ -203,24 +247,29 @@ def tsne_plot(X, images, color, num_clusters=30, perplexity=5, serve_port=8104, 
 
 def set_model_mode(model_dict, phase):
     for name, model in model_dict.items():
-        print('setting', name, phase)
         if name != 'opt':
+            #print('setting', name, phase)
             if phase == 'valid':
                 model_dict[name].eval()
             else:
                 model_dict[name].train()
     return model_dict
 
+def kl_normal(mu_0, log_var_0, mu_1, log_var_1):
+    # from https://gist.github.com/Kaixhin/9c90221aae216f59ca2594ea000b0afe
+    kl = (2 * (log_var_1 - log_var_0)).exp() + ((mu_1 - mu_0) / log_var_0.exp()) ** 2 - 2 * (log_var_1 - log_var_0) - 1
+    return 0.5 * kl.sum(1).mean()
+
 def kl_loss_function(u_q, s_q, u_p, s_p, reduction='sum'):
     ''' reconstruction loss + coding cost
      coding cost is the KL divergence bt posterior and conditional prior
+     All inputs are 2d
      Args:
-         u_q: mean of model posterior
+         u_q:  mean of model posterior
          s_q: log std of model posterior
          u_p: mean of conditional prior
          s_p: log std of conditional prior
 
-     reduction is sum over elements, then mean over batch
      Returns: loss
      '''
     acn_KLD = (s_p-s_q-0.5 + ((2*s_q).exp() + (u_q-u_p).pow(2)) / (2*(2*s_p).exp()))

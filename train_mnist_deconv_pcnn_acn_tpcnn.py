@@ -32,7 +32,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import ConvEncoder, PriorNetwork
+from acn_models import ConvEncode
 from acn_models import PriorNetwork, ConvEncodeDecodeLarge
 from IPython import embed
 
@@ -107,14 +107,15 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
 
 
 
-    pcnn_decoder = GatedPixelCNN(input_dim=info['num_input_chans'],
+    pcnn_decoder = GatedPixelCNN(
+                                 input_dim=info['input_channels'],
                                  output_dim=info['output_dim'],
                                  dim=info['pixel_cnn_dim'],
                                  n_layers=info['num_pcnn_layers'],
                                  float_condition_size=info['code_length'],
+                                 spatial_condition_size=info['input_channels'],
                                  # output dim is same as deconv output in this
                                  # case
-                                 spatial_condition_size=info['output_dim'],
                                  last_layer_bias=info['last_layer_bias'],
                                  use_batch_norm=info['use_batch_norm'],
                                  output_projection_size=info['output_projection_size']).to(info['device'])
@@ -143,7 +144,7 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         bs,c,h,w = target.shape
         model_dict['opt'].zero_grad()
         #z, u_q, s_q = model_dict['encoder_model'](data)
-        deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
+        deconv_out, z, u_q, s_q = model_dict['conv_model'](data)
         if phase == 'train':
             # fit knn during training
             model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
@@ -151,18 +152,24 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         u_p, s_p = model_dict['prior_model'](u_q)
         # calculate loss
         kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
-        data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
+        #data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
         # pixel cnn reconstruction with spatial reconditioning
-        pcnn_yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z, spatial_condition=deconv_yhat_batch)
+        # now passing spatial condition as one channel - pcnn can only control z
+        if rec_loss_type == 'dml':
+            deconv_rec_loss = discretized_mix_logistic_loss(deconv_out, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+            deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_out.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
         if rec_loss_type  == 'bce':
-            deconv_rec_loss = F.binary_cross_entropy(torch.sigmoid(deconv_yhat_batch), target, reduction=info['reduction'])
+            deconv_rec_loss = F.binary_cross_entropy(torch.sigmoid(deconv_out), target, reduction=info['reduction'])
+            deconv_yhat_batch = torch.sigmoid(deconv_yhat_batch)
+
+        pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch.detach())
+        if rec_loss_type  == 'bce':
             pcnn_rec_loss = F.binary_cross_entropy(torch.sigmoid(pcnn_yhat_batch), target, reduction=info['reduction'])
         if rec_loss_type == 'dml':
             # TODO - what normalization is needed here
             # input into dml should be bt -1 and 1
             # pcnn starts at kl:6 dml:3017 with sum reduction on Fashion MNIST -
             # not sure if this model will train yet
-            deconv_rec_loss = discretized_mix_logistic_loss(deconv_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
             pcnn_rec_loss = discretized_mix_logistic_loss(pcnn_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
         loss = kl+deconv_rec_loss+pcnn_rec_loss
         if phase == 'train':
@@ -177,11 +184,12 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
         if phase == 'train':
             train_cnt+=bs
         if idx == num_batches-2:
+            pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_yhat_batch.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
             # store example near end for plotting
             example = {'data':data.detach().cpu(),
                        'target':target.detach().cpu(),
                        'deconv_yhat':deconv_yhat_batch.detach().cpu(),
-                       'pcnn_yhat':pcnn_yhat_batch.detach().cpu(),
+                       'pcnn_yhat':pcnn_yhat_batch.cpu(),
                        }
         if not idx % 10:
             loss_avg = {'kl':kl_running/run,
@@ -248,11 +256,12 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
             valid_img_filepath = os.path.join(base_filepath, "%s_%010d_valid_rec.png"%(base_filename, train_cnt))
             plot_filepath = os.path.join(base_filepath, "%s_%010dloss.png"%(base_filename, train_cnt))
 
-            if info['rec_loss_type'] == 'dml':
-                train_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(train_example['pcnn_yhat'], info['nr_logistic_mix'])
-                valid_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(valid_example['pcnn_yhat'], info['nr_logistic_mix'])
-                train_example['deconv_yhat'] = sample_from_discretized_mix_logistic(train_example['deconv_yhat'], info['nr_logistic_mix'])
-                valid_example['deconv_yhat'] = sample_from_discretized_mix_logistic(valid_example['deconv_yhat'], info['nr_logistic_mix'])
+            # do sampling in run loop
+            #if info['rec_loss_type'] == 'dml':
+            #    train_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(train_example['pcnn_yhat'], info['nr_logistic_mix'])
+            #    valid_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(valid_example['pcnn_yhat'], info['nr_logistic_mix'])
+            #    train_example['deconv_yhat'] = sample_from_discretized_mix_logistic(train_example['deconv_yhat'], info['nr_logistic_mix'])
+            #    valid_example['deconv_yhat'] = sample_from_discretized_mix_logistic(valid_example['deconv_yhat'], info['nr_logistic_mix'])
 
             train_example['target'] = rescale_inv(train_example['target'])
             train_example['deconv_yhat'] = rescale_inv(train_example['deconv_yhat'])
@@ -340,26 +349,21 @@ def call_tsne_plot(model_dict, data_dict, info):
             for idx, (data, label, batch_idx) in enumerate(data_loader):
                 target = data = data.to(info['device'])
                 # yhat_batch is bt 0-1
-                deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
+                deconv_out, z, u_q, s_q = model_dict['conv_model'](data)
                 u_p, s_p = model_dict['prior_model'](u_q)
-                if info['rec_loss_type'] == 'bce':
-                    assert target.max() <=1
-                    assert target.min() >=0
-                    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch))
-                elif info['rec_loss_type'] == 'dml':
-                    assert target.max() <=1
-                    assert target.min() >=-1
-                    yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                else:
-                    raise ValueError('invalid rec_loss_type')
+#                if info['rec_loss_type'] == 'bce':
+#                    yhat_batch = torch.sigmoid(pcnn_yhat)
+#                elif info['rec_loss_type'] == 'dml':
+#                    yhat_batch = sample_from_discretized_mix_logistic(pcnn_yhat, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+#                else:
+#                    raise ValueError('invalid rec_loss_type')
                 X = u_q.cpu().numpy()
-                if info['use_pred']:
-                    images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
-                    T = 'pred'
-                else:
-                    images = target[:,0].cpu().numpy()
-                    T = 'target'
+#                if info['use_pred']:
+#                    images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
+#                    T = 'pred'
+#                else:
+                images = target[:,0].cpu().numpy()
+                T = 'target'
                 color = label
                 param_name = '_%s_P%s_%s.html'%(phase, info['perplexity'], T)
                 html_path = info['model_loadpath'].replace('.pt', param_name)
@@ -370,6 +374,7 @@ def call_tsne_plot(model_dict, data_dict, info):
 
 def sample(model_dict, data_dict, info):
     from skvideo.io import vwrite
+    from copy import deepcopy
     model_dict = set_model_mode(model_dict, 'valid')
     output_savepath = args.model_loadpath.replace('.pt', '')
     with torch.no_grad():
@@ -379,28 +384,29 @@ def sample(model_dict, data_dict, info):
                 for idx, (data, label, batch_idx) in enumerate(data_loader):
                     bs = min([data.shape[0], 10])
                     target = data = data[:bs].to(info['device'])
-                    deconv_output, z, u_q, s_q = model_dict['conv_model'](data)
+                    deconv_out, z, u_q, s_q = model_dict['conv_model'](data)
                     # teacher forced version
                     print('data', data.min(), data.max())
                     print('target', target.min(), target.max())
-                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_output)
+                    if info['rec_loss_type'] == 'bce':
+                        deconv_yhat_batch = torch.sigmoid(deconv_out)
+                    elif info['rec_loss_type'] == 'dml':
+                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_out, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch)
                     if info['rec_loss_type'] == 'bce':
                         assert target.max() <=1
                         assert target.min() >=0
-                        deconv_yhat_batch = torch.sigmoid(deconv_output)
                         pcnn_yhat_batch = torch.sigmoid(pcnn_yhat_batch)
                     elif info['rec_loss_type'] == 'dml':
                         assert target.max() <=1
                         assert target.min() >=-1
-                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                         pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_yhat_batch, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                     else:
                         raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
                     np_target = data.detach().cpu().numpy()
-                    np_deconv_yhat = deconv_yhat_batch.detach().cpu().numpy()
+                    np_deconv_yhat = deepcopy(deconv_yhat_batch.detach().cpu().numpy())
                     np_pcnn_yhat = pcnn_yhat_batch.detach().cpu().numpy()
-                    #canvas = deconv_yhat_batch
                     if args.use_zero_as_canvas:
                         print('using zero output as sample canvas')
                         canvas = torch.zeros_like(deconv_yhat_batch)
@@ -414,24 +420,22 @@ def sample(model_dict, data_dict, info):
                         for j in range(canvas.shape[2]):
                             print('sampling row: %s'%j)
                             for k in range(canvas.shape[3]):
-                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z, spatial_condition=deconv_output)
+                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z, spatial_condition=deconv_yhat_batch)
                                 if info['rec_loss_type'] == 'bce':
                                     # output should be bt 0 and 1 for canvas
                                     canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
                                 if info['rec_loss_type'] == 'dml':
-                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
                                     # output should be bt -1 and 1 for canvas
                                     #print(output[:,i,j,k].min(), output[:,i,j,k].max())
-                                    canvas[:,i,j,k] = output[:,i,j,k]
-                                # add frames for video
-                                if not k%5:
-                                    building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
+                                    asam = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                                    canvas[:,i,j,k] = asam[:,i,j,k]
+                    #output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
 
                     print('deconv_yhat_batch', deconv_yhat_batch.min(), deconv_yhat_batch.max())
                     print('pcnn_yhat_batch', pcnn_yhat_batch.min(), pcnn_yhat_batch.max())
                     print('canvas', canvas.min(), canvas.max())
                     f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
-                    np_output = output.detach().cpu().numpy()
+                    np_output = canvas.detach().cpu().numpy()
                     for idx in range(bs):
                         ax[idx,0].matshow(np_target[idx,0], cmap=plt.cm.gray)
                         ax[idx,1].matshow(np_deconv_yhat[idx,0], cmap=plt.cm.gray)
@@ -448,7 +452,7 @@ def sample(model_dict, data_dict, info):
                         ax[idx,1].axis('off')
                         ax[idx,2].axis('off')
                         ax[idx,3].axis('off')
-                    iname = output_savepath + st_can + '_sample_%s.png'%phase
+                    iname = output_savepath + st_can +'_sample_%s.png'%phase
                     print('plotting %s'%iname)
                     plt.savefig(iname)
                     plt.close()
@@ -477,8 +481,8 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_acn_deconv', help='name of experiment')
-    parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
+    parser.add_argument('-e', '--exp_name', default='pcnn_acn_deconv_samspatcond', help='name of experiment')
+    parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     # batch norm resulted in worse outcome in pixel-cnn-only model
     parser.add_argument('--use_batch_norm', default=False, action='store_true')
@@ -508,7 +512,7 @@ if __name__ == '__main__':
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=10, type=int, help='perplexity used in scikit-learn tsne call')
-   parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
+    parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
     # walk-thru
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
     parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
@@ -526,7 +530,6 @@ if __name__ == '__main__':
     elif args.model_loadpath != '':
         # use full path to model
         base_filepath = os.path.split(args.model_loadpath)[0]
-        args.exp_name = ''
     else:
         # create new base_filepath
         if args.use_batch_norm:

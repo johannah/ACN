@@ -32,12 +32,11 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import ConvEncoder, PriorNetwork
-from acn_models import PriorNetwork, ConvEncodeDecodeLarge
+from acn_models import PriorNetwork, ACNVQVAEres
 from IPython import embed
 
 
-def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMNIST'):
+def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     '''
     load details of previous model if applicable, otherwise create new models
     '''
@@ -96,30 +95,32 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
         info['last_layer_bias'] = 0.5
         info['output_dim']  = info['num_output_chans']
     # setup models
-    prior_model = PriorNetwork(size_training_set=info['size_training_set'],
-                               code_length=info['code_length'], k=info['num_k']).to(info['device'])
-    conv_model = ConvEncodeDecodeLarge(code_len=info['code_length'],
+    vq_acn_model = ConvEncodeDecodeLargeVQVAE(code_len=info['code_length'],
                                input_size=info['input_channels'],
                                output_size=info['output_dim'],
                                encoder_output_size=info['encoder_output_size'],
                                last_layer_bias=info['last_layer_bias'],
+                               num_clusters=info['num_vqk'],
+                               num_z=info['num_z'],
                                ).to(info['device'])
 
+    prior_model = PriorNetwork(size_training_set=info['size_training_set'],
+                               code_length=info['code_length'], k=info['num_k']).to(info['device'])
 
-
-    pcnn_decoder = GatedPixelCNN(input_dim=info['num_input_chans'],
+    pcnn_decoder = GatedPixelCNN(
+                                 input_dim=info['input_channels'],
                                  output_dim=info['output_dim'],
                                  dim=info['pixel_cnn_dim'],
                                  n_layers=info['num_pcnn_layers'],
                                  float_condition_size=info['code_length'],
+                                 spatial_condition_size=info['input_channels'],
                                  # output dim is same as deconv output in this
                                  # case
-                                 spatial_condition_size=info['output_dim'],
                                  last_layer_bias=info['last_layer_bias'],
                                  use_batch_norm=info['use_batch_norm'],
                                  output_projection_size=info['output_projection_size']).to(info['device'])
 
-    model_dict = {'conv_model':conv_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder}
+    model_dict = {'vq_acn_model':vq_acn_model, 'prior_model':prior_model, 'pcnn_decoder':pcnn_decoder}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -131,75 +132,88 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
+def forward_pass(model_dict, data, label, batch_index, phase, info):
+    target = data = data.to(info['device'])
+    bs,c,h,w = target.shape
+    model_dict['opt'].zero_grad()
+    data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
+    vq_dml, z, u_q, s_q, z_e_x, z_q_x, latents = model_dict['vq_acn_model'](data)
+    if phase == 'train':
+        # fit knn during training
+        model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
+        model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
+    u_p, s_p = model_dict['prior_model'](u_q)
+    vq_yhat_batch = sample_from_discretized_mix_logistic(vq_dml.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+    pcnn_dml = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=vq_yhat_batch.detach())
+    # dont sample pcnn dml unless necessary
+    return model_dict, data, target, z, u_q, s_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents, vq_yhat_batch, pcnn_dml
 
-def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, dropout_rate):
+def account_losses(loss_dict):
+    loss_avg = {}
+    for key in loss_dict.keys():
+        if key != 'running':
+            loss_avg[key] = loss_dict[key]/loss_dict['running']
+    return loss_avg
+
+def run(train_cnt, model_dict, data_dict, phase, info):
     st = time.time()
-    run = pcnn_rec_running = deconv_rec_running = kl_running = loss_running = 0.0
+    # track losses for this epoch
+    loss_dict = {'running': 0,
+                 'kl':0,
+                 'vq_%s'%info['rec_loss_type']:0,
+                 'pcnn_%s'%info['rec_loss_type']:0,
+                 'vq':0,
+                 'commit':0,
+                  }
     data_loader = data_dict[phase]
     model_dict = set_model_mode(model_dict, phase)
     num_batches = len(data_loader)
     for idx, (data, label, batch_index) in enumerate(data_loader):
-        target = data = data.to(device)
-        bs,c,h,w = target.shape
-        model_dict['opt'].zero_grad()
-        #z, u_q, s_q = model_dict['encoder_model'](data)
-        deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
-        if phase == 'train':
-            # fit knn during training
-            model_dict['prior_model'].codes[batch_index] = u_q.detach().cpu().numpy()
-            model_dict['prior_model'].fit_knn(model_dict['prior_model'].codes)
-        u_p, s_p = model_dict['prior_model'](u_q)
-        # calculate loss
+        bs = data.shape[0]
+        fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+        model_dict, data, target, z, u_q, s_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents, vq_yhat_batch, pcnn_dml = fp_out
         kl = kl_loss_function(u_q, s_q, u_p, s_p, reduction=info['reduction'])
-        data = F.dropout(data, p=dropout_rate, training=True, inplace=False)
         # pixel cnn reconstruction with spatial reconditioning
-        pcnn_yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z, spatial_condition=deconv_yhat_batch)
-        if rec_loss_type  == 'bce':
-            deconv_rec_loss = F.binary_cross_entropy(torch.sigmoid(deconv_yhat_batch), target, reduction=info['reduction'])
-            pcnn_rec_loss = F.binary_cross_entropy(torch.sigmoid(pcnn_yhat_batch), target, reduction=info['reduction'])
-        if rec_loss_type == 'dml':
-            # TODO - what normalization is needed here
-            # input into dml should be bt -1 and 1
-            # pcnn starts at kl:6 dml:3017 with sum reduction on Fashion MNIST -
-            # not sure if this model will train yet
-            deconv_rec_loss = discretized_mix_logistic_loss(deconv_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
-            pcnn_rec_loss = discretized_mix_logistic_loss(pcnn_yhat_batch, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
-        loss = kl+deconv_rec_loss+pcnn_rec_loss
+        # now passing spatial condition as one channel - pcnn can only control z
+        vq_rec_loss = discretized_mix_logistic_loss(vq_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+        pcnn_rec_loss = discretized_mix_logistic_loss(pcnn_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+        # VQ Losses
+        vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
+        commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
+        commit_loss *= info['vq_commitment_beta']
+        loss = kl+vq_rec_loss+pcnn_rec_loss+vq_loss+commit_loss
         if phase == 'train':
             loss.backward()
             model_dict['opt'].step()
-        run+=bs
-        kl_running+= kl.item()
-        deconv_rec_running+=deconv_rec_loss.item()
-        pcnn_rec_running+=pcnn_rec_loss.item()
-        loss_running+= loss.item()
+
+        loss_dict['running']+=bs
+        loss_dict['loss']+=loss.item()
+        loss_dict['kl']+= kl.item()
+        loss_dict['vq_%s'%info['rec_loss_type']]+=vq_rec_loss.item()
+        loss_dict['pcnn_%s'%info['rec_loss_type']]+=pcnn_rec_loss.item()
+        loss_dict['vq']+= vq_loss.item()
+        loss_dict['commit']+= commit_loss.item()
         # add batch size because it hasn't been added to train cnt yet
         if phase == 'train':
             train_cnt+=bs
         if idx == num_batches-2:
+            pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_dml.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
             # store example near end for plotting
             example = {'data':data.detach().cpu(),
                        'target':target.detach().cpu(),
-                       'deconv_yhat':deconv_yhat_batch.detach().cpu(),
-                       'pcnn_yhat':pcnn_yhat_batch.detach().cpu(),
+                       'vq_yhat':vq_yhat_batch.detach().cpu(),
+                       'pcnn_yhat':pcnn_yhat_batch.cpu(),
                        }
         if not idx % 10:
-            loss_avg = {'kl':kl_running/run,
-                        'deconv_rec_loss_type':deconv_rec_running/run,
-                        'pcnn_rec_loss_type':pcnn_rec_running/run,
-                        'loss':loss_running/run}
-            print(idx, loss_avg)
+            print(train_cnt, idx, account_losses(loss_dict))
 
     # store average loss for return
-    loss_avg = {'kl':kl_running/run,
-                'deconv_rec_loss_type':deconv_rec_running/run,
-                'pcnn_rec_loss_type':pcnn_rec_running/run,
-                'loss':loss_running/run}
+    loss_avg = account_losses(loss_dict)
+    print(loss_avg)
     print("finished %s after %s secs at cnt %s"%(phase,
                                                 time.time()-st,
                                                 train_cnt,
                                                 ))
-    print(loss_avg)
     return model_dict, data_dict, loss_avg, example
 
 def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
@@ -208,37 +222,24 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
     base_filename = os.path.split(info['base_filepath'])[1]
     while train_cnt < info['num_examples_to_train']:
         print('starting epoch %s on %s'%(epoch_cnt, info['device']))
-        model_dict, data_dict, train_loss_avg, train_example = run_acn(train_cnt,
-                                                                       model_dict,
-                                                                       data_dict,
-                                                                       phase='train',
-                                                                       device=info['device'],
-                                                                       rec_loss_type=info['rec_loss_type'],
-                                                                       dropout_rate=info['dropout_rate'])
+        model_dict, data_dict, train_loss_avg, train_example = run_acn(train_cnt, model_dict, data_dict, phase='train', info=info)
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
-        if not epoch_cnt % info['save_every_epochs']:
+        if not epoch_cnt % info['save_every_epochs'] or epoch_cnt ==1:
             # make a checkpoint
             print('starting valid phase')
-            model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt,
-                                                                           model_dict,
-                                                                           data_dict,
-                                                                           phase='valid',
-                                                                           device=info['device'],
-                                                                           rec_loss_type=info['rec_loss_type'],
-                                                                           dropout_rate=info['dropout_rate'])
+            model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt, model_dict, data_dict, phase='valid', info=info)
+            # track losses
             for loss_key in valid_loss_avg.keys():
                 for lphase in ['train_losses', 'valid_losses']:
                     if loss_key not in info[lphase].keys():
                         info[lphase][loss_key] = []
                 info['valid_losses'][loss_key].append(valid_loss_avg[loss_key])
                 info['train_losses'][loss_key].append(train_loss_avg[loss_key])
-
             # store model
             state_dict = {}
             for key, model in model_dict.items():
                 state_dict[key+'_state_dict'] = model.state_dict()
-
             info['train_cnts'].append(train_cnt)
             info['epoch_cnt'] = epoch_cnt
             state_dict['info'] = info
@@ -247,88 +248,18 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
             train_img_filepath = os.path.join(base_filepath,"%s_%010d_train_rec.png"%(base_filename, train_cnt))
             valid_img_filepath = os.path.join(base_filepath, "%s_%010d_valid_rec.png"%(base_filename, train_cnt))
             plot_filepath = os.path.join(base_filepath, "%s_%010dloss.png"%(base_filename, train_cnt))
-
-            if info['rec_loss_type'] == 'dml':
-                train_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(train_example['pcnn_yhat'], info['nr_logistic_mix'])
-                valid_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(valid_example['pcnn_yhat'], info['nr_logistic_mix'])
-                train_example['deconv_yhat'] = sample_from_discretized_mix_logistic(train_example['deconv_yhat'], info['nr_logistic_mix'])
-                valid_example['deconv_yhat'] = sample_from_discretized_mix_logistic(valid_example['deconv_yhat'], info['nr_logistic_mix'])
-
-            train_example['target'] = rescale_inv(train_example['target'])
-            train_example['deconv_yhat'] = rescale_inv(train_example['deconv_yhat'])
-            train_example['pcnn_yhat'] = rescale_inv(train_example['pcnn_yhat'])
+            # plot example images
+            for ex in [train_example, valid_example]:
+                for key, data in ex.items():
+                    train_example[key] = rescale_inv(data)
             plot_example(train_img_filepath, train_example, num_plot=10)
             plot_example(valid_img_filepath, valid_example, num_plot=10)
+            # save model
             save_checkpoint(state_dict, filename=ckpt_filepath)
-
+            # plot losses
             plot_losses(info['train_cnts'],
                         info['train_losses'],
                         info['valid_losses'], name=plot_filepath, rolling_length=1)
-
-
-def latent_walk(model_dict, data_dict, info):
-    from skvideo.io import vwrite
-    from imageio import imwrite
-    model_dict = set_model_mode(model_dict, 'valid')
-    output_savepath = args.model_loadpath.replace('.pt', '')
-    phase = 'train'
-    data_loader = data_dict[phase]
-    bs = args.num_walk_steps
-    with torch.no_grad():
-        for walki in range(10):
-            for idx, (data, label, batch_idx) in enumerate(data_loader):
-                # limit number of samples
-                lim = min([data.shape[0], 10])
-                target = data = data[:lim].to(info['device'])
-                deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
-                break
-            _,c,h,w=target.shape
-            latents = torch.zeros((bs,z.shape[1]))
-            si = 0; ei = 1
-            sl = label[si].item(); el = label[ei].item()
-            print('walking from %s to %s'%(sl, el))
-            for code_idx in range(z.shape[1]):
-                s = z[si,code_idx]
-                e = z[ei,code_idx]
-                code_walk = torch.linspace(s,e,bs)
-                latents[:,code_idx] = code_walk
-            latents = latents.to(info['device'])
-            ## create blank canvas for autoregressive sampling
-            canvas = torch.zeros((bs,c,h,w))
-            for i in range(canvas.shape[1]):
-                for j in range(canvas.shape[2]):
-                    print('sampling row: %s'%j)
-                    for k in range(canvas.shape[3]):
-                        output = model_dict['pcnn_decoder'](x=canvas, float_condition=latents, spatial_condition=deconv_yhat_batch)
-                        if info['rec_loss_type'] == 'bce':
-                            canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
-                        if info['rec_loss_type'] == 'dml':
-                            sample_dml = sample_from_discretized_mix_logistic(output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                            canvas[:,i,j,k] = sample_dml[:,i,j,k].detach()
-            npst = target[si:si+1].detach().cpu().numpy()
-            npen = target[ei:ei+1].detach().cpu().numpy()
-            npwalk = canvas.detach().cpu().numpy()
-            # add multiple frames of each sample as a hacky way to make the
-            # video more interpretable to humans
-            walk_video = np.concatenate((npst))
-            walk_strip = npst[0,0]
-            for ww in range(npwalk.shape[0]):
-                walk_video = np.concatenate((walk_video,
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             ))
-                walk_strip = np.concatenate((walk_strip, npwalk[ww:ww+1,0]))
-            walk_video = np.concatenate((walk_video,
-                                         npen,
-                                         ))
-            walk_strip = np.concatenate((walk_strip, npen[0,0]))
-            walk_video = (walk_video*255).astype(np.uint8)
-            mname = output_savepath + '%s_s%s_e%s_walk.mp4'%(walki,sl,el)
-            iname = output_savepath + '%s_s%s_e%s_walk_strip.png'%(walki,sl,el)
-            imwrite(iname, walk_strip)
-            ## make movie
-            print('writing walk movie')
-            vwrite(mname, walk_video)
-            print('finished %s'%mname)
 
 def call_tsne_plot(model_dict, data_dict, info):
     from utils import tsne_plot
@@ -337,29 +268,12 @@ def call_tsne_plot(model_dict, data_dict, info):
     with torch.no_grad():
         for phase in ['valid', 'train']:
             data_loader = data_dict[phase]
-            for idx, (data, label, batch_idx) in enumerate(data_loader):
-                target = data = data.to(info['device'])
-                # yhat_batch is bt 0-1
-                deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
-                u_p, s_p = model_dict['prior_model'](u_q)
-                if info['rec_loss_type'] == 'bce':
-                    assert target.max() <=1
-                    assert target.min() >=0
-                    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch))
-                elif info['rec_loss_type'] == 'dml':
-                    assert target.max() <=1
-                    assert target.min() >=-1
-                    yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                else:
-                    raise ValueError('invalid rec_loss_type')
+            for idx, (data, label, batch_index) in enumerate(data_loader):
+                fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+                model_dict, data, target, z, u_q, s_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents, vq_yhat_batch, pcnn_dml = fp_out
                 X = u_q.cpu().numpy()
-                if info['use_pred']:
-                    images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
-                    T = 'pred'
-                else:
-                    images = target[:,0].cpu().numpy()
-                    T = 'target'
+                images = target[:,0].cpu().numpy()
+                T = 'target'
                 color = label
                 param_name = '_%s_P%s_%s.html'%(phase, info['perplexity'], T)
                 html_path = info['model_loadpath'].replace('.pt', param_name)
@@ -369,98 +283,64 @@ def call_tsne_plot(model_dict, data_dict, info):
                 break
 
 def sample(model_dict, data_dict, info):
-    from skvideo.io import vwrite
+    from copy import deepcopy
     model_dict = set_model_mode(model_dict, 'valid')
     output_savepath = args.model_loadpath.replace('.pt', '')
     with torch.no_grad():
         for phase in ['train', 'valid']:
             data_loader = data_dict[phase]
             with torch.no_grad():
-                for idx, (data, label, batch_idx) in enumerate(data_loader):
+                for idx, (data, label, batch_index) in enumerate(data_loader):
                     bs = min([data.shape[0], 10])
-                    target = data = data[:bs].to(info['device'])
-                    deconv_output, z, u_q, s_q = model_dict['conv_model'](data)
-                    # teacher forced version
+                    fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+                    model_dict, data, target, z, u_q, s_q, u_p, s_p, vq_dml, z_e_x, z_q_x, latents, vq_yhat_batch, pcnn_dml = fp_out
+                    pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_dml.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                   # teacher forced version
                     print('data', data.min(), data.max())
                     print('target', target.min(), target.max())
-                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_output)
-                    if info['rec_loss_type'] == 'bce':
-                        assert target.max() <=1
-                        assert target.min() >=0
-                        deconv_yhat_batch = torch.sigmoid(deconv_output)
-                        pcnn_yhat_batch = torch.sigmoid(pcnn_yhat_batch)
-                    elif info['rec_loss_type'] == 'dml':
-                        assert target.max() <=1
-                        assert target.min() >=-1
-                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                        pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_yhat_batch, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                    else:
-                        raise ValueError('invalid rec_loss_type')
                     # create blank canvas for autoregressive sampling
                     np_target = data.detach().cpu().numpy()
-                    np_deconv_yhat = deconv_yhat_batch.detach().cpu().numpy()
+                    np_vq_yhat = deepcopy(vq_yhat_batch.detach().cpu().numpy())
                     np_pcnn_yhat = pcnn_yhat_batch.detach().cpu().numpy()
-                    #canvas = deconv_yhat_batch
                     if args.use_zero_as_canvas:
                         print('using zero output as sample canvas')
-                        canvas = torch.zeros_like(deconv_yhat_batch)
+                        canvas = torch.zeros_like(vq_yhat_batch)
                         st_can = '_zc'
                     else:
                         print('using deconv output as sample canvas')
-                        canvas = deconv_yhat_batch
+                        canvas = vq_yhat_batch
                         st_can = '_dc'
-                    building_canvas = []
                     for i in range(canvas.shape[1]):
                         for j in range(canvas.shape[2]):
                             print('sampling row: %s'%j)
                             for k in range(canvas.shape[3]):
-                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z, spatial_condition=deconv_output)
-                                if info['rec_loss_type'] == 'bce':
-                                    # output should be bt 0 and 1 for canvas
-                                    canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
-                                if info['rec_loss_type'] == 'dml':
-                                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                                    # output should be bt -1 and 1 for canvas
-                                    #print(output[:,i,j,k].min(), output[:,i,j,k].max())
-                                    canvas[:,i,j,k] = output[:,i,j,k]
-                                # add frames for video
-                                if not k%5:
-                                    building_canvas.append(deepcopy(canvas[0].detach().cpu().numpy()))
-
-                    print('deconv_yhat_batch', deconv_yhat_batch.min(), deconv_yhat_batch.max())
+                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z, spatial_condition=vq_yhat_batch.detach())
+                                # output should be bt -1 and 1 for canvas
+                                asam = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                                canvas[:,i,j,k] = asam[:,i,j,k]
+                    output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                    np_output = output.detach().cpu().numpy()
+                    print('vq_yhat_batch', vq_yhat_batch.min(), vq_yhat_batch.max())
                     print('pcnn_yhat_batch', pcnn_yhat_batch.min(), pcnn_yhat_batch.max())
                     print('canvas', canvas.min(), canvas.max())
                     f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
-                    np_output = output.detach().cpu().numpy()
                     for idx in range(bs):
                         ax[idx,0].matshow(np_target[idx,0], cmap=plt.cm.gray)
-                        ax[idx,1].matshow(np_deconv_yhat[idx,0], cmap=plt.cm.gray)
+                        ax[idx,1].matshow(np_vq_yhat[idx,0], cmap=plt.cm.gray)
                         ax[idx,2].matshow(np_pcnn_yhat[idx,0], cmap=plt.cm.gray)
                         ax[idx,3].matshow(np_output[idx,0], cmap=plt.cm.gray)
-                        #ax[idx,0].imshow(nptarget[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
-                        #ax[idx,1].imshow(npyhat[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
-                        #ax[idx,2].imshow(npoutput[idx,0], cmap=plt.cm.gray, vmin=vmin, vmax=vmax)
                         ax[idx,0].set_title('true')
-                        ax[idx,1].set_title('conv')
+                        ax[idx,1].set_title('vq')
                         ax[idx,2].set_title('tf')
                         ax[idx,3].set_title('sam')
                         ax[idx,0].axis('off')
                         ax[idx,1].axis('off')
                         ax[idx,2].axis('off')
                         ax[idx,3].axis('off')
-                    iname = output_savepath + st_can + '_sample_%s.png'%phase
+                    iname = output_savepath + st_can +'_sample_%s.png'%phase
                     print('plotting %s'%iname)
                     plt.savefig(iname)
                     plt.close()
-
-                    ## make movie
-                    #building_canvas = (np.array(building_canvas)*255).astype(np.uint8)
-                    #print('writing building movie')
-                    #mname = output_savepath + '_build_%s.mp4'%phase
-                    #vwrite(mname, building_canvas)
-                    #print('finished %s'%mname)
-                    ## only do one batch
-                    break
 
 if __name__ == '__main__':
     from argparse import ArgumentParser
@@ -477,8 +357,8 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_acn_deconv', help='name of experiment')
-    parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
+    parser.add_argument('-e', '--exp_name', default='pcnn_acn_vq', help='name of experiment')
+    parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     # batch norm resulted in worse outcome in pixel-cnn-only model
     parser.add_argument('--use_batch_norm', default=False, action='store_true')
@@ -495,8 +375,12 @@ if __name__ == '__main__':
     parser.add_argument('--pixel_cnn_dim', default=64, type=int, help='pixel cnn dimension')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--num_classes', default=10, help='num classes for class condition in pixel cnn')
-    parser.add_argument('--encoder_output_size', default=2048, help='output as a result of the flatten of the encoder - found experimentally')
+    parser.add_argument('--encoder_output_size', default=1024, help='output as a result of the flatten of the encoder - found experimentally')
     parser.add_argument('--num_pcnn_layers', default=8, help='num layers for pixel cnn')
+    # vq model setup
+    parser.add_argument('--vq_commitment_beta', default=0.25, help='scale for loss 3 in vqvae - how hard to enforce commitment to cluster')
+    parser.add_argument('--num_vqk', default=512, type=int)
+    parser.add_argument('--num_z', default=64, type=int)
     # dataset setup
     parser.add_argument('-d',  '--dataset_name', default='FashionMNIST', help='which mnist to use', choices=['MNIST', 'FashionMNIST'])
     parser.add_argument('--model_savedir', default='../model_savedir', help='save checkpoints here')
@@ -508,7 +392,7 @@ if __name__ == '__main__':
     # tsne info
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=10, type=int, help='perplexity used in scikit-learn tsne call')
-   parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
+    parser.add_argument('-ut', '--use_pred', default=False, action='store_true',  help='plot tsne with pred image instead of target')
     # walk-thru
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
     parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
@@ -526,7 +410,6 @@ if __name__ == '__main__':
     elif args.model_loadpath != '':
         # use full path to model
         base_filepath = os.path.split(args.model_loadpath)[0]
-        args.exp_name = ''
     else:
         # create new base_filepath
         if args.use_batch_norm:
@@ -544,7 +427,7 @@ if __name__ == '__main__':
     print('base filepath is %s'%base_filepath)
 
     info = create_new_info_dict(vars(args), base_filepath)
-    model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_conv_acn_pcnn_models(info, args.model_loadpath)
+    model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, args.model_loadpath)
     if args.tsne:
         call_tsne_plot(model_dict, data_dict, info)
     if args.sample:

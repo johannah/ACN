@@ -32,7 +32,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import ConvEncoder, PriorNetwork
+from acn_models import ConvEncoder, tPTPriorNetwork
 from IPython import embed
 
 
@@ -86,7 +86,7 @@ def create_conv_acn_pcnn_models(info, model_loadpath='', dataset_name='FashionMN
     # setup models
     encoder_model = ConvEncoder(info['code_length'], input_size=info['input_channels'],
                             encoder_output_size=info['encoder_output_size']).to(info['device'])
-    prior_model = PriorNetwork(size_training_set=info['size_training_set'],
+    prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
     # pixel cnn architecture is dependent on loss
     # for dml prediction, need to output mixture of size nmix
@@ -193,7 +193,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                                                                        dropout_rate=info['dropout_rate'])
         epoch_cnt +=1
         train_cnt +=info['size_training_set']
-        if not epoch_cnt % info['save_every_epochs']:
+        if not epoch_cnt % info['save_every_epochs'] or epoch_cnt == 1:
             # make a checkpoint
             print('starting valid phase')
             model_dict, data_dict, valid_loss_avg, valid_example = run_acn(train_cnt,
@@ -430,13 +430,13 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=394)
     parser.add_argument('--num_threads', default=2)
     parser.add_argument('-se', '--save_every_epochs', default=5, type=int)
-    parser.add_argument('-bs', '--batch_size', default=128, type=int)
+    parser.add_argument('-bs', '--batch_size', default=84, type=int)
     parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float)
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_acn', help='name of experiment')
-    parser.add_argument('-dr', '--dropout_rate', default=0.5, type=float)
+    parser.add_argument('-e', '--exp_name', default='pcnn_acn_sumsanity_tptp', help='name of experiment')
+    parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     # batch norm resulted in worse outcome in pixel-cnn-only model
     parser.add_argument('--use_batch_norm', default=False, action='store_true')

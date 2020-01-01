@@ -34,7 +34,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import PTPriorNetwork, ACNres
+from acn_models import tPTPriorNetwork, ACNres
 from IPython import embed
 
 
@@ -106,7 +106,7 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
                                hidden_size=info['hidden_size'],
                                ).to(info['device'])
 
-    prior_model = PTPriorNetwork(size_training_set=info['size_training_set'],
+    prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
     prior_model.codes = prior_model.codes.to(info['device'])
     model_dict = {'acn_model':acn_model, 'prior_model':prior_model}
@@ -120,7 +120,6 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     if args.model_loadpath !='':
        for name,model in model_dict.items():
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
-            print("LOADING WEIGHTS FROM", name)
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 def account_losses(loss_dict):
@@ -308,7 +307,6 @@ def daydream(model_dict, data_dict, info):
     import matplotlib.transforms as mtrans
     from skvideo.io import vwrite
     # always be in eval mode
-    num_examples = 10
     with torch.no_grad():
         for phase in ['train', 'valid']:
             data_loader = data_dict[phase]
@@ -317,13 +315,16 @@ def daydream(model_dict, data_dict, info):
             # only run data loader once
             plt_path = info['model_loadpath'].replace('.pt', '_%s_debug_daydream.png'%phase)
             mv_path = info['model_loadpath'].replace('.pt', '_%s_debug_daydream.mp4'%phase)
-            f,ax = plt.subplots(num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, num_examples))
+            f,ax = plt.subplots(args.num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, args.num_examples))
             # always set phase == train because the prior model was trained
             # with noise added and will not perform with input without noise
-            model_dict = set_model_mode(model_dict, phase='valid')
-            target = data = data[:num_examples].to(info['device'])
+            model_dict = set_model_mode(model_dict, phase=phase)
+            target = data = data[:args.num_examples].to(info['device'])
             z, u_q = model_dict['acn_model'](data)
             rec_dml =  model_dict['acn_model'].decode(z)
+            u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
+            u_p = u_p_flat.view(args.num_examples, 4, 7, 7)
+            s_p = s_p_flat.view(args.num_examples, 4, 7, 7)
 
             # get data for plotting later
             exyhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=True)
@@ -331,19 +332,17 @@ def daydream(model_dict, data_dict, info):
             nptarget = target.cpu().detach().numpy()
             cnt = 0
             _,c,h,w = target.shape
-            out_video = np.ones((args.num_compare*num_examples, h, w*2))
-            # go through each item in example to get samples
-            for ii in range(num_examples):
-                one_u_q = u_q[ii][None]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
-                one_u_q_flat = one_u_q.view(args.num_compare, info['code_length'])
-                # should be forward - but i didn't save codes in old model
-                one_u_p_flat, one_s_p_flat = model_dict['prior_model'].encode(one_u_q_flat)
+            out_video = np.ones((args.num_compare*args.num_examples, h, w*2))
+            for ii in range(args.num_examples):
+                one_u_p = u_p[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
+                one_s_p = s_p[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
+                print(u_p[ii].min(), u_p[ii].max())
+                print(u_q[ii].min(), u_q[ii].max())
                 # now we have several comparisons from this example
                 # s_p is logsigma
                 # 0.5 multiplier bc we parameterize the std dev not var -
                 # see kld calculation - which is what defines std vs var
-                z_flat = one_u_p_flat+torch.exp(0.5*one_s_p_flat)*torch.randn(one_s_p_flat.shape).to(info['device'])
-                z = z_flat.view(args.num_compare, 4, 7, 7)
+                z = one_u_p+torch.exp(0.5*one_s_p)*torch.randn(one_s_p.shape).to(info['device'])
                 srec_dml =  model_dict['acn_model'].decode(z)
                 syhat = sample_from_discretized_mix_logistic(srec_dml, info['nr_logistic_mix'], only_mean=True)
                 npyhat = syhat.cpu().detach().numpy()
@@ -428,7 +427,7 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='deconv_acn_res_convthruout_repq', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='deconv_acn_res_convthruout_repq_bigprior', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
@@ -454,6 +453,7 @@ if __name__ == '__main__':
     # daydream
     parser.add_argument('-dd', '--daydream', action='store_true', default=False)
     parser.add_argument('-nc', '--num_compare', default=20, type=int, help='number of comparisons to daydream from prior')
+    parser.add_argument('-nx', '--num_examples', default=10, type=int, help='number of examples to daydream from prior')
     # walk-thru
     parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
     parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
