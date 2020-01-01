@@ -34,7 +34,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import PTPriorNetwork, ACNres
+from acn_models import tPTPriorNetwork, ACNVQVAEres
 from IPython import embed
 
 
@@ -87,29 +87,41 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
 
     # pixel cnn architecture is dependent on loss
     # for dml prediction, need to output mixture of size nmix
-    if info['rec_loss_type'] == 'dml':
-        info['nmix'] =  (2*info['nr_logistic_mix']+info['nr_logistic_mix'])*info['num_output_chans']
-        info['output_dim']  = info['nmix']
-        # last layer for pcnn
-        info['last_layer_bias'] = 0.0
-    if info['rec_loss_type'] == 'bce':
-        # last layer for pcnn
-        info['last_layer_bias'] = 0.5
-        info['output_dim']  = info['num_output_chans']
+    info['nmix'] =  (2*info['nr_logistic_mix']+info['nr_logistic_mix'])*info['num_output_chans']
+    info['output_dim']  = info['nmix']
+    # last layer for pcnn
+    info['last_layer_bias'] = 0.0
 
     # setup models
     # acn prior with vqvae embedding
-    acn_model = ACNres(code_len=info['code_length'],
+    vq_acn_model = ACNVQVAEres(code_len=info['code_length'],
                                input_size=info['input_channels'],
                                output_size=info['output_dim'],
                                encoder_output_size=info['encoder_output_size'],
                                hidden_size=info['hidden_size'],
+                               num_clusters=info['num_vqk'],
+                               num_z=info['num_z'],
                                ).to(info['device'])
 
-    prior_model = PTPriorNetwork(size_training_set=info['size_training_set'],
+
+    prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
     prior_model.codes = prior_model.codes.to(info['device'])
-    model_dict = {'acn_model':acn_model, 'prior_model':prior_model}
+
+    pcnn_decoder = GatedPixelCNN(input_dim=info['num_input_chans'],
+                                 output_dim=info['output_dim'],
+                                 dim=info['pixel_cnn_dim'],
+                                 n_layers=info['num_pcnn_layers'],
+                                 float_condition_size=info['code_length'],
+                                 # output dim is same as deconv output in this
+                                 # case
+                                 spatial_condition_size=info['input_channels'],
+                                 last_layer_bias=info['last_layer_bias'],
+                                 use_batch_norm=info['use_batch_norm'],
+                                 output_projection_size=info['output_projection_size']).to(info['device'])
+
+
+    model_dict = {'vq_acn_model':vq_acn_model, 'prior_model':prior_model, 'pcnn_decoder_model':pcnn_decoder}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -120,7 +132,6 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
     if args.model_loadpath !='':
        for name,model in model_dict.items():
             model_dict[name].load_state_dict(_dict[name+'_state_dict'])
-            print("LOADING WEIGHTS FROM", name)
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 def account_losses(loss_dict):
@@ -143,22 +154,28 @@ def forward_pass(model_dict, data, label, batch_index, phase, info):
     bs,c,h,w = target.shape
     model_dict['opt'].zero_grad()
     data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
-    z, u_q = model_dict['acn_model'](data)
+    z, u_q = model_dict['vq_acn_model'](data)
     u_q_flat = u_q.view(bs, info['code_length'])
+    z_flat = z.view(bs, info['code_length'])
     if phase == 'train':
         # fit acn knn during training
         model_dict['prior_model'].update_codebook(batch_index, u_q_flat.detach())
     u_p, s_p = model_dict['prior_model'](u_q_flat)
     u_p = u_p.view(bs, 4, 7, 7)
     s_p = s_p.view(bs, 4, 7, 7)
-    rec_dml =  model_dict['acn_model'].decode(z)
-    return model_dict, data, target, u_q, u_p, s_p, rec_dml
+    rec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
+    rec_yhat = sample_from_discretized_mix_logistic(rec_dml.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+    pcnn_dml = model_dict['pcnn_decoder_model'](x=data, float_condition=z_flat, spatial_condition=rec_yhat)
+    return model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml
 
 def run(train_cnt, model_dict, data_dict, phase, info):
     st = time.time()
     loss_dict = {'running': 0,
              'kl':0,
-             'rec_%s'%info['rec_loss_type']:0,
+             'vq_%s'%info['rec_loss_type']:0,
+             'pcnn_%s'%info['rec_loss_type']:0,
+             'vq':0,
+             'commit':0,
              'loss':0,
               }
     data_loader = data_dict[phase]
@@ -166,20 +183,29 @@ def run(train_cnt, model_dict, data_dict, phase, info):
     for idx, (data, label, batch_index) in enumerate(data_loader):
         bs,c,h,w = data.shape
         fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-        model_dict, data, target, u_q, u_p, s_p, rec_dml = fp_out
+        model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml = fp_out
         if idx == 0:
             log_ones = torch.zeros(bs, info['code_length']).to(info['device'])
-        elif bs != log_ones.shape[0]:
+        if bs != log_ones.shape[0]:
             log_ones = torch.zeros(bs, info['code_length']).to(info['device'])
         kl = kl_loss_function(u_q.view(bs, info['code_length']), log_ones,
                               u_p.view(bs, info['code_length']), s_p.view(bs, info['code_length']),
                               reduction=info['reduction'])
-        rec_loss = discretized_mix_logistic_loss(rec_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])
-        loss = kl+rec_loss
+        rec_loss = discretized_mix_logistic_loss(rec_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+        pcnn_loss = discretized_mix_logistic_loss(pcnn_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+        vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
+        commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
+        commit_loss *= info['vq_commitment_beta']
+
+        loss = kl+rec_loss+pcnn_loss+commit_loss+vq_loss
         loss_dict['running']+=bs
         loss_dict['loss']+=loss.item()
         loss_dict['kl']+= kl.item()
-        loss_dict['rec_%s'%info['rec_loss_type']]+=rec_loss.item()
+        loss_dict['vq_%s'%info['rec_loss_type']]+=rec_loss.item()
+        loss_dict['pcnn_%s'%info['rec_loss_type']]+=pcnn_loss.item()
+        loss_dict['vq']+= vq_loss.item()
+        loss_dict['commit']+= commit_loss.item()
+
         if phase == 'train':
             model_dict = clip_parameters(model_dict)
             loss.backward()
@@ -187,10 +213,12 @@ def run(train_cnt, model_dict, data_dict, phase, info):
             train_cnt+=bs
         if idx == num_batches-2:
             # store example near end for plotting
-            rec_yhat_batch = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+            pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
             example = {'data':rescale_inv(data.detach().cpu()),
                        'target':rescale_inv(target.detach().cpu()),
-                       'vq_yhat':rescale_inv(rec_yhat_batch.detach().cpu())}
+                       'vq_yhat':rescale_inv(rec_yhat.detach().cpu()),
+                       'pcnn_yhat':rescale_inv(pcnn_yhat.detach().cpu()),
+                       }
         if not idx % 10:
             print(train_cnt, idx, account_losses(loss_dict))
 
@@ -249,81 +277,31 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
                         info['train_losses'],
                         info['valid_losses'], name=plot_filepath, rolling_length=1)
 
-
-def latent_walk(model_dict, data_dict, info):
-    from skvideo.io import vwrite
-    model_dict = set_model_mode(model_dict, 'valid')
-    output_savepath = args.model_loadpath.replace('.pt', '')
-    phase = 'train'
-    data_loader = data_dict[phase]
-    bs = args.num_walk_steps
-    with torch.no_grad():
-        for walki in range(10):
-            for idx, (data, label, batch_idx) in enumerate(data_loader):
-                # limit number of samples
-                lim = min([data.shape[0], 10])
-                target = data = data[:lim].to(info['device'])
-                z, u_q, s_q = model_dict['encoder_model'](data)
-                break
-            _,c,h,w=target.shape
-            latents = torch.zeros((bs,z.shape[1]))
-            si = 0; ei = 1
-            sl = label[si].item(); el = label[ei].item()
-            print('walking from %s to %s'%(sl, el))
-            for code_idx in range(z.shape[1]):
-                s = z[si,code_idx]
-                e = z[ei,code_idx]
-                code_walk = torch.linspace(s,e,bs)
-                latents[:,code_idx] = code_walk
-            latents = latents.to(info['device'])
-            output = model_dict['conv_decoder'](latents)
-            npst = target[si:si+1].detach().cpu().numpy()
-            npen = target[ei:ei+1].detach().cpu().numpy()
-            if info['rec_loss_type'] == 'dml':
-                output = sample_from_discretized_mix_logistic(output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-            npwalk = output.detach().cpu().numpy()
-            # add multiple frames of each sample as a hacky way to make the
-            # video more interpretable to humans
-            walk_video = np.concatenate((npst, npst,
-                                         npst, npst,
-                                         npst, npst))
-            for ww in range(npwalk.shape[0]):
-                walk_video = np.concatenate((walk_video,
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             ))
-            walk_video = np.concatenate((walk_video,
-                                         npen, npen,
-                                         npen, npen,
-                                         npen, npen))
-            walk_video = (walk_video*255).astype(np.uint8)
-            ## make movie
-            print('writing walk movie')
-            mname = output_savepath + '%s_s%s_e%s_walk.mp4'%(walki,sl,el)
-            vwrite(mname, walk_video)
-            print('finished %s'%mname)
-
 def daydream(model_dict, data_dict, info):
+    """
+    daydream sampling according to figure 1 - encode, sample prior, decode, and then re-encode and repeat
+    """
     import matplotlib.transforms as mtrans
     from skvideo.io import vwrite
     # always be in eval mode
-    num_examples = 10
     with torch.no_grad():
         for phase in ['train', 'valid']:
             data_loader = data_dict[phase]
             for idx, (data, label, batch_index) in enumerate(data_loader):
                 break
             # only run data loader once
-            plt_path = info['model_loadpath'].replace('.pt', '_%s_debug_daydream.png'%phase)
-            mv_path = info['model_loadpath'].replace('.pt', '_%s_debug_daydream.mp4'%phase)
-            f,ax = plt.subplots(num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, num_examples))
+            plt_path = info['model_loadpath'].replace('.pt', '_%s_daydream.png'%phase)
+            mv_path = info['model_loadpath'].replace('.pt',  '_%s_daydream.mp4'%phase)
+            f,ax = plt.subplots(args.num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, args.num_examples))
             # always set phase == train because the prior model was trained
             # with noise added and will not perform with input without noise
-            model_dict = set_model_mode(model_dict, phase='valid')
-            target = data = data[:num_examples].to(info['device'])
-            z, u_q = model_dict['acn_model'](data)
-            rec_dml =  model_dict['acn_model'].decode(z)
+            model_dict = set_model_mode(model_dict, phase=phase)
+            target = data = data[:args.num_examples].to(info['device'])
+            z, u_q = model_dict['vq_acn_model'](data)
+            rec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
+            u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
+            #u_p = u_p_flat.view(args.num_examples, 4, 7, 7)
+            #s_p = s_p_flat.view(args.num_examples, 4, 7, 7)
 
             # get data for plotting later
             exyhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=True)
@@ -331,19 +309,108 @@ def daydream(model_dict, data_dict, info):
             nptarget = target.cpu().detach().numpy()
             cnt = 0
             _,c,h,w = target.shape
-            out_video = np.ones((args.num_compare*num_examples, h, w*2))
-            # go through each item in example to get samples
-            for ii in range(num_examples):
-                one_u_q = u_q[ii][None]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
-                one_u_q_flat = one_u_q.view(args.num_compare, info['code_length'])
-                # should be forward - but i didn't save codes in old model
-                one_u_p_flat, one_s_p_flat = model_dict['prior_model'].encode(one_u_q_flat)
+            out_video = np.ones((args.num_compare*args.num_examples, h, w*2))
+            # true and u_q for each example
+            for ie in range(args.num_examples):
+                ax[ie,0].matshow(nptarget[ie,0], cmap=plt.cm.gray)
+                ax[ie,0].axis('off')
+                ax[ie,1].matshow(npex[ie,0], cmap=plt.cm.gray)
+                ax[ie,1].axis('off')
+
+            for ic in range(args.num_compare):
                 # now we have several comparisons from this example
                 # s_p is logsigma
                 # 0.5 multiplier bc we parameterize the std dev not var -
                 # see kld calculation - which is what defines std vs var
-                z_flat = one_u_p_flat+torch.exp(0.5*one_s_p_flat)*torch.randn(one_s_p_flat.shape).to(info['device'])
-                z = z_flat.view(args.num_compare, 4, 7, 7)
+                z_flat = u_p_flat+torch.exp(0.5*s_p_flat)*torch.randn(s_p_flat.shape).to(info['device'])
+                z = z_flat.view(args.num_examples, 4, 7, 7)
+                srec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
+                syhat = sample_from_discretized_mix_logistic(srec_dml, info['nr_logistic_mix'], only_mean=True)
+                npyhat = syhat.cpu().detach().numpy()
+
+                # encode result for next image
+                z, u_q = model_dict['vq_acn_model'](syhat)
+                u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
+
+                for ie in range(args.num_examples):
+                    ax[ie,ic+2].matshow(npyhat[ie,0], cmap=plt.cm.gray)
+                    ax[ie,ic+2].axis('off')
+                    out_video[(ie*args.num_compare)+ic,:] = np.concatenate((npex[ie], npyhat[ie]), 2)
+                    if not ic:
+                        ax[ie, ic+2].set_title('%s'%ie)
+                cnt+=1
+            ax[0,0].set_title('true')
+            ax[0,1].set_title('u_q')
+            mid = 2+int(args.num_compare/2)
+            ax[0,mid].set_title('u_p daydreams')
+            # rearange the axes for no overlap
+            f.tight_layout()
+            # Get the bounding boxes of the axes including text decorations
+            r = f.canvas.get_renderer()
+            get_bbox = lambda ax: ax.get_tightbbox(r).transformed(f.transFigure.inverted())
+            bboxes = np.array(list(map(get_bbox, ax.flat)), mtrans.Bbox).reshape(ax.shape)
+
+            #Get the minimum and maximum extent, get the coordinate half-way between those
+            xmin = np.array(list(map(lambda b: b.x0, bboxes.flat))).reshape(ax.shape).min(axis=0)
+            xmax = np.array(list(map(lambda b: b.x1, bboxes.flat))).reshape(ax.shape).min(axis=0)
+            # min is left most extent of the subplot indexed
+            # max is right most extent
+            cmax = xmax[1]; cmin = xmin[2]
+            cmid = cmax + (cmin-cmax)/2.0
+            line = plt.Line2D((cmid,cmid),(0,1), color="r", linewidth=3)
+            f.add_artist(line)
+            print('saving daydream', plt_path)
+            plt.savefig(plt_path)
+            plt.close()
+            print('writing video', mv_path)
+            out_video = (((out_video+1)/2)*255).astype(np.uint8)
+            inputdict = {"-r":"10"}
+            vwrite(mv_path, out_video, inputdict=inputdict)
+#
+
+def sample_prior(model_dict, data_dict, info):
+    """
+     sample from u_p and plot different results
+    """
+    import matplotlib.transforms as mtrans
+    from skvideo.io import vwrite
+    # always be in eval mode
+    with torch.no_grad():
+        for phase in ['train', 'valid']:
+            data_loader = data_dict[phase]
+            for idx, (data, label, batch_index) in enumerate(data_loader):
+                break
+            # only run data loader once
+            plt_path = info['model_loadpath'].replace('.pt', '_%s_prior_sample.png'%phase)
+            mv_path = info['model_loadpath'].replace('.pt',  '_%s_prior_sample.mp4'%phase)
+            f,ax = plt.subplots(args.num_examples, args.num_compare+2, sharex=True, sharey=True, figsize=(args.num_compare+2, args.num_examples))
+            # always set phase == train because the prior model was trained
+            # with noise added and will not perform with input without noise
+            model_dict = set_model_mode(model_dict, phase=phase)
+            target = data = data[:args.num_examples].to(info['device'])
+            z, u_q = model_dict['acn_model'](data)
+            rec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
+            u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
+            u_p = u_p_flat.view(args.num_examples, 4, 7, 7)
+            s_p = s_p_flat.view(args.num_examples, 4, 7, 7)
+
+            # get data for plotting later
+            exyhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=True)
+            npex = exyhat.cpu().detach().numpy()
+            nptarget = target.cpu().detach().numpy()
+            cnt = 0
+            _,c,h,w = target.shape
+            out_video = np.ones((args.num_compare*args.num_examples, h, w*2))
+            for ii in range(args.num_examples):
+                one_u_p = u_p[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
+                one_s_p = s_p[ii]*torch.ones((args.num_compare, 4, 7, 7)).to(info['device'])
+                print(u_p[ii].min(), u_p[ii].max())
+                print(u_q[ii].min(), u_q[ii].max())
+                # now we have several comparisons from this example
+                # s_p is logsigma
+                # 0.5 multiplier bc we parameterize the std dev not var -
+                # see kld calculation - which is what defines std vs var
+                z = one_u_p+torch.exp(0.5*one_s_p)*torch.randn(one_s_p.shape).to(info['device'])
                 srec_dml =  model_dict['acn_model'].decode(z)
                 syhat = sample_from_discretized_mix_logistic(srec_dml, info['nr_logistic_mix'], only_mean=True)
                 npyhat = syhat.cpu().detach().numpy()
@@ -359,8 +426,8 @@ def daydream(model_dict, data_dict, info):
             ax[0,0].set_title('true')
             ax[0,1].set_title('u_q')
             mid = 2+int(args.num_compare/2)
-            ax[0,mid].set_title('u_p daydreams')
-            print('saving daydream', plt_path)
+            ax[0,mid].set_title('u_p samples')
+            print('saving prior samples', plt_path)
             # rearange the axes for no overlap
             f.tight_layout()
             # Get the bounding boxes of the axes including text decorations
@@ -394,7 +461,7 @@ def call_plot(model_dict, data_dict, info):
             data_loader = data_dict[phase]
             for idx, (data, label, batch_index) in enumerate(data_loader):
                 fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-                model_dict, data, target, u_q, u_p, s_p, rec_dml = fp_out
+                model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml = fp_out
                 bs = data.shape[0]
                 u_q_flat = u_q.view(bs, info['code_length'])
                 X = u_q_flat.cpu().numpy()
@@ -413,6 +480,73 @@ def call_plot(model_dict, data_dict, info):
                               html_out_path=html_path, serve=False)
                 break
 
+def sample(model_dict, data_dict, info):
+    from skvideo.io import vwrite
+    model_dict = set_model_mode(model_dict, 'valid')
+    output_savepath = args.model_loadpath.replace('.pt', '')
+    with torch.no_grad():
+        for phase in ['train', 'valid']:
+            data_loader = data_dict[phase]
+            with torch.no_grad():
+                for idx, (data, label, batch_index) in enumerate(data_loader):
+                    break
+                bs = min([data.shape[0], 10])
+                fp_out = forward_pass(model_dict, data[:bs], label[:bs], batch_index[:bs], phase, info)
+                model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml = fp_out
+                # teacher forced version
+                z_flat = u_q.view(bs, info['code_length'])
+                pcnn_dml = model_dict['pcnn_decoder_model'](x=target, float_condition=z_flat, spatial_condition=rec_yhat.detach())
+                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                # create blank canvas for autoregressive sampling
+                np_target = data.detach().cpu().numpy()
+                np_rec_yhat = rec_yhat.detach().cpu().numpy()
+                np_pcnn_yhat = pcnn_yhat.detach().cpu().numpy()
+                #canvas = deconv_yhat_batch
+                if args.use_zero_as_canvas:
+                    print('using zero output as sample canvas')
+                    canvas = torch.zeros_like(rec_yhat)
+                    st_can = '_zc'
+                else:
+                    print('using deconv output as sample canvas')
+                    canvas = rec_yhat
+                    st_can = '_dc'
+                for i in range(canvas.shape[1]):
+                    for j in range(canvas.shape[2]):
+                        print('sampling row: %s'%j)
+                        for k in range(canvas.shape[3]):
+                            output = model_dict['pcnn_decoder_model'](x=canvas, float_condition=z_flat, spatial_condition=rec_yhat.detach())
+                            output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                            canvas[:,i,j,k] = output[:,i,j,k]
+
+                f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
+                np_output = output.detach().cpu().numpy()
+                for idx in range(bs):
+                    ax[idx,0].matshow(np_target[idx,0], cmap=plt.cm.gray)
+                    ax[idx,1].matshow(np_rec_yhat[idx,0], cmap=plt.cm.gray)
+                    ax[idx,2].matshow(np_pcnn_yhat[idx,0], cmap=plt.cm.gray)
+                    ax[idx,3].matshow(np_output[idx,0], cmap=plt.cm.gray)
+                    ax[idx,0].set_title('true')
+                    ax[idx,1].set_title('conv')
+                    ax[idx,2].set_title('tf')
+                    ax[idx,3].set_title('sam')
+                    ax[idx,0].axis('off')
+                    ax[idx,1].axis('off')
+                    ax[idx,2].axis('off')
+                    ax[idx,3].axis('off')
+                iname = output_savepath + st_can + '_sample_%s.png'%phase
+                print('plotting %s'%iname)
+                plt.savefig(iname)
+                plt.close()
+
+                ## make movie
+                #building_canvas = (np.array(building_canvas)*255).astype(np.uint8)
+                #print('writing building movie')
+                #mname = output_savepath + '_build_%s.mp4'%phase
+                #vwrite(mname, building_canvas)
+                #print('finished %s'%mname)
+                ## only do one batch
+
+
 if __name__ == '__main__':
     from argparse import ArgumentParser
     parser = ArgumentParser(description='train acn')
@@ -428,37 +562,45 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='deconv_acn_res_convthruout_repq', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='pcnn_vqdeconv_acn_res_convthruout_repq_bigprior', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
     parser.add_argument('--nr_logistic_mix', default=10, type=int)
+    # pcnn
+    parser.add_argument('--pixel_cnn_dim', default=64, type=int, help='pixel cnn dimension')
+    parser.add_argument('--num_pcnn_layers', default=8, help='num layers for pixel cnn')
+    parser.add_argument('-bn', '--use_batch_norm', action='store_true', default=False)
+    parser.add_argument('--output_projection_size', default=32, type=int)
     # acn model setup
     parser.add_argument('-cl', '--code_length', default=196, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
     parser.add_argument('--hidden_size', default=256, type=int)
+    # vq model setup
+    parser.add_argument('--vq_commitment_beta', default=0.25, help='scale for loss 3 in vqvae - how hard to enforce commitment to cluster')
+    parser.add_argument('--num_vqk', default=512, type=int)
+    parser.add_argument('--num_z', default=64, type=int)
 
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--encoder_output_size', default=784, help='output as a result of the flatten of the encoder - found experimentally')
-    #parser.add_argument('--encoder_output_size', default=6272, help='output as a result of the flatten of the encoder - found experimentally')
     parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
     # dataset setup
     parser.add_argument('-d',  '--dataset_name', default='FashionMNIST', help='which mnist to use', choices=['MNIST', 'FashionMNIST'])
     parser.add_argument('--model_savedir', default='../model_savedir', help='save checkpoints here')
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
+    # sampling info
+    parser.add_argument('-s', '--sample', action='store_true', default=False)
+    parser.add_argument('-z', '--use_zero_as_canvas', action='store_true', default=False)
     # latent pca/tsne info
     parser.add_argument('--pca', action='store_true', default=False)
     parser.add_argument('--tsne', action='store_true', default=False)
     parser.add_argument('-p', '--perplexity', default=10, type=int, help='perplexity used in scikit-learn tsne call')
     # daydream
+    parser.add_argument('-sp', '--sample_prior', action='store_true', default=False)
     parser.add_argument('-dd', '--daydream', action='store_true', default=False)
-    parser.add_argument('-nc', '--num_compare', default=20, type=int, help='number of comparisons to daydream from prior')
-    # walk-thru
-    parser.add_argument('-w', '--walk', action='store_true', default=False, help='walk between two images in latent space')
-    parser.add_argument('-st', '--start_label', default=0, type=int, help='start latent walk image from label')
-    parser.add_argument('-ed', '--end_label', default=5, type=int, help='end latent walk image from label')
-    parser.add_argument('-nw', '--num_walk_steps', default=40, type=int, help='number of steps in latent space between start and end image')
+    parser.add_argument('-nc', '--num_compare', default=60, type=int, help='number of comparisons to daydream from prior')
+    parser.add_argument('-nx', '--num_examples', default=10, type=int, help='number of examples to daydream from prior')
     args = parser.parse_args()
     # note - when reloading model, this will use the seed given in args - not
     # the original random seed
@@ -475,15 +617,15 @@ if __name__ == '__main__':
         base_filepath = os.path.split(args.model_loadpath)[0]
     else:
         # create new base_filepath
-        #if args.use_batch_norm:
-        #    bn = '_bn'
-        #else:
-        #    bn = ''
+        if args.use_batch_norm:
+            bn = '_bn'
+        else:
+            bn = ''
         if args.dropout_rate > 0:
             do='_do%s'%args.dropout_rate
         else:
             do=''
-        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+do
+        args.exp_name += '_'+args.dataset_name + '_'+args.rec_loss_type+do+bn
         base_filepath = os.path.join(args.model_savedir, args.exp_name)
     print('base filepath is %s'%base_filepath)
 
@@ -494,12 +636,17 @@ if __name__ == '__main__':
     sm = nn.Softmax(dim=1)
     if args.tsne or args.pca:
         call_plot(model_dict, data_dict, info)
-    if args.walk:
-        latent_walk(model_dict, data_dict, info)
+    #if args.walk:
+    #    latent_walk(model_dict, data_dict, info)
+    if args.sample_prior:
+        sample_prior(model_dict, data_dict, info)
     if args.daydream:
         daydream(model_dict, data_dict, info)
+    if args.sample:
+        # limit batch size
+        sample(model_dict, data_dict, info)
     # only train if we weren't asked to do anything else
-    if not max([args.daydream, args.tsne, args.pca, args.walk]):
+    if not max([args.sample, args.daydream, args.tsne, args.pca]):
         write_log_files(info)
         train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv)
 
