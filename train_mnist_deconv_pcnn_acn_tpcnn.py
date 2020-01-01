@@ -32,7 +32,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import ConvEncoder, PriorNetwork
+from acn_models import ConvEncode
 from acn_models import PriorNetwork, ConvEncodeDecodeLarge
 from IPython import embed
 
