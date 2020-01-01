@@ -483,7 +483,7 @@ def sample(model_dict, data_dict, info):
                 model_dict, data, target, u_q, u_p, s_p, rec_dml, rec_yhat, pcnn_dml = fp_out
                 # teacher forced version
                 z_flat = u_q.view(bs, info['code_length'])
-                pcnn_yhat = model_dict['pcnn_decoder_model'](x=target, float_condition=z_flat, spatial_condition=rec_yhat)
+                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                 # create blank canvas for autoregressive sampling
                 np_target = data.detach().cpu().numpy()
                 np_rec_yhat = rec_yhat.detach().cpu().numpy()
@@ -532,7 +532,6 @@ def sample(model_dict, data_dict, info):
                 #vwrite(mname, building_canvas)
                 #print('finished %s'%mname)
                 ## only do one batch
-                break
 
 
 if __name__ == '__main__':
