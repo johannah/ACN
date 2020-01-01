@@ -592,7 +592,7 @@ class ACNVQVAEres(nn.Module):
 
 class ACNres(nn.Module):
     def __init__(self, code_len, input_size=1, output_size=1, encoder_output_size=1024,
-                       hidden_size=256,
+                       hidden_size=256, use_decoder=True
                        ):
 
         super(ACNres, self).__init__()
@@ -601,6 +601,7 @@ class ACNres(nn.Module):
         # encoder output size found experimentally when architecture changes
         self.encoder_output_size = encoder_output_size
         self.eo = 7
+        self.use_decoder = use_decoder
 
         self.encoder = nn.Sequential(
             nn.Conv2d(input_size, hidden_size, 4, 2, 1),
@@ -614,7 +615,8 @@ class ACNres(nn.Module):
             # need to get small enough to have reasonable knn - this is
             # 4*7*7=196
             )
-        self.decoder = nn.Sequential(
+        if self.use_decoder:
+            self.decoder = nn.Sequential(
                   nn.Conv2d(4, 16, 1, 1, 0),
                   nn.Conv2d(16, hidden_size, 1, 1, 0),
                   ResBlock(hidden_size),
