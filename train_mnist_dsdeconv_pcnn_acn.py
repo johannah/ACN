@@ -192,10 +192,11 @@ def run_acn(train_cnt, model_dict, data_dict, phase, device, rec_loss_type, drop
             train_cnt+=bs
         if idx == num_batches-2:
             # store example near end for plotting
+            pcnn_sample  = sample_from_discretized_mix_logistic(pcnn_yhat_batch, info['nr_logistic_mix'])
             example = {'data':data.detach().cpu(),
                        'target':target.detach().cpu(),
                        'deconv_yhat':deconv_yhat_batch.detach().cpu(),
-                       'pcnn_yhat':pcnn_yhat_batch.detach().cpu(),
+                       'pcnn_yhat':pcnn_sample.detach().cpu(),
                        }
         if not idx % 10:
             loss_avg = {'kl':kl_running/run,
@@ -262,11 +263,11 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
             valid_img_filepath = os.path.join(base_filepath, "%s_%010d_valid_rec.png"%(base_filename, train_cnt))
             plot_filepath = os.path.join(base_filepath, "%s_%010dloss.png"%(base_filename, train_cnt))
 
-            if info['rec_loss_type'] == 'dml':
-                train_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(train_example['pcnn_yhat'], info['nr_logistic_mix'])
-                valid_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(valid_example['pcnn_yhat'], info['nr_logistic_mix'])
-                train_example['deconv_yhat'] = sample_from_discretized_mix_logistic(train_example['deconv_yhat'], info['nr_logistic_mix'])
-                valid_example['deconv_yhat'] = sample_from_discretized_mix_logistic(valid_example['deconv_yhat'], info['nr_logistic_mix'])
+            #if info['rec_loss_type'] == 'dml':
+            #    train_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(train_example['pcnn_yhat'], info['nr_logistic_mix'])
+            #    valid_example['pcnn_yhat'] = sample_from_discretized_mix_logistic(valid_example['pcnn_yhat'], info['nr_logistic_mix'])
+            #    train_example['deconv_yhat'] = sample_from_discretized_mix_logistic(train_example['deconv_yhat'], info['nr_logistic_mix'])
+            #    valid_example['deconv_yhat'] = sample_from_discretized_mix_logistic(valid_example['deconv_yhat'], info['nr_logistic_mix'])
 
             train_example['target'] = rescale_inv(train_example['target'])
             train_example['deconv_yhat'] = rescale_inv(train_example['deconv_yhat'])
@@ -356,24 +357,24 @@ def call_tsne_plot(model_dict, data_dict, info):
                 # yhat_batch is bt 0-1
                 deconv_yhat_batch, z, u_q, s_q = model_dict['conv_model'](data)
                 u_p, s_p = model_dict['prior_model'](u_q)
-                if info['rec_loss_type'] == 'bce':
-                    assert target.max() <=1
-                    assert target.min() >=0
-                    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch))
-                elif info['rec_loss_type'] == 'dml':
-                    assert target.max() <=1
-                    assert target.min() >=-1
-                    yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
-                    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                else:
-                    raise ValueError('invalid rec_loss_type')
+                #if info['rec_loss_type'] == 'bce':
+                #    assert target.max() <=1
+                #    assert target.min() >=0
+                #    yhat_batch = torch.sigmoid(model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_yhat_batch))
+                #elif info['rec_loss_type'] == 'dml':
+                #    assert target.max() <=1
+                #    assert target.min() >=-1
+                #    yhat_batch_dml = model_dict['pcnn_decoder'](x=target, float_condition=z)
+                #    yhat_batch = sample_from_discretized_mix_logistic(yhat_batch_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                #else:
+                #    raise ValueError('invalid rec_loss_type')
                 X = u_q.cpu().numpy()
-                if info['use_pred']:
-                    images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
-                    T = 'pred'
-                else:
-                    images = target[:,0].cpu().numpy()
-                    T = 'target'
+                #if info['use_pred']:
+                #    images = np.round(yhat_batch.cpu().numpy()[:,0], 0).astype(np.int32)
+                #    T = 'pred'
+                #else:
+                images = target[:,0].cpu().numpy()
+                T = 'target'
                 color = label
                 param_name = '_%s_P%s_%s.html'%(phase, info['perplexity'], T)
                 html_path = info['model_loadpath'].replace('.pt', param_name)
@@ -393,20 +394,33 @@ def sample(model_dict, data_dict, info):
                 for idx, (data, label, batch_idx) in enumerate(data_loader):
                     bs = min([data.shape[0], 10])
                     target = data = data[:bs].to(info['device'])
-                    deconv_output, z, u_q, s_q = model_dict['conv_model'](data)
+                    deconv_out, z, u_q, s_q = model_dict['conv_model'](data)
                     # teacher forced version
                     print('data', data.min(), data.max())
                     print('target', target.min(), target.max())
-                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=target, float_condition=z, spatial_condition=deconv_output)
+
+                    if info['rec_loss_type']  == 'bce':
+                        deconv_yhat_batch = torch.sigmoid(deconv_out)
+                    if info['rec_loss_type'] == 'dml':
+                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_out, info['nr_logistic_mix'], only_mean=False)
+                    # downsample deconv for spatial conditioning
+                    # deconv_yhat_batch is [bs,1,28,28] -> we want to downsample it by 4 by
+                    # taking every 4 rows as input to spatial conditioning
+                    sidxs = [2,6,10,14,18,22,26]
+                    small_deconv = model_dict['upsample'](deconv_yhat_batch[:,:,sidxs][:,:,:,sidxs])
+
+                    # pixel cnn reconstruction with spatial reconditioning
+                    pcnn_yhat_batch = model_dict['pcnn_decoder'](x=data, float_condition=z, spatial_condition=small_deconv)
+
                     if info['rec_loss_type'] == 'bce':
                         assert target.max() <=1
                         assert target.min() >=0
-                        deconv_yhat_batch = torch.sigmoid(deconv_output)
+                        deconv_yhat_batch = torch.sigmoid(deconv_out)
                         pcnn_yhat_batch = torch.sigmoid(pcnn_yhat_batch)
                     elif info['rec_loss_type'] == 'dml':
                         assert target.max() <=1
                         assert target.min() >=-1
-                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                        deconv_yhat_batch = sample_from_discretized_mix_logistic(deconv_out, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                         pcnn_yhat_batch = sample_from_discretized_mix_logistic(pcnn_yhat_batch, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                     else:
                         raise ValueError('invalid rec_loss_type')
@@ -428,7 +442,7 @@ def sample(model_dict, data_dict, info):
                         for j in range(canvas.shape[2]):
                             print('sampling row: %s'%j)
                             for k in range(canvas.shape[3]):
-                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z, spatial_condition=deconv_output)
+                                output = model_dict['pcnn_decoder'](x=canvas, float_condition=z, spatial_condition=small_deconv)
                                 if info['rec_loss_type'] == 'bce':
                                     # output should be bt 0 and 1 for canvas
                                     canvas[:,i,j,k] = torch.sigmoid(output[:,i,j,k].detach())
