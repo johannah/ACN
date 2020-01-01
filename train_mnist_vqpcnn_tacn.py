@@ -34,7 +34,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import tPTPriorNetwork, ACNres
+from acn_models import tPTPriorNetwork, ACNVQVAEres
 from IPython import embed
 
 
@@ -197,7 +197,7 @@ def run(train_cnt, model_dict, data_dict, phase, info):
         commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
         commit_loss *= info['vq_commitment_beta']
 
-        loss = kl+rec_loss+pcnn_loss
+        loss = kl+rec_loss+pcnn_loss+commit_loss+vq_loss
         loss_dict['running']+=bs
         loss_dict['loss']+=loss.item()
         loss_dict['kl']+= kl.item()
@@ -297,8 +297,8 @@ def daydream(model_dict, data_dict, info):
             # with noise added and will not perform with input without noise
             model_dict = set_model_mode(model_dict, phase=phase)
             target = data = data[:args.num_examples].to(info['device'])
-            z, u_q = model_dict['acn_model'](data)
-            rec_dml =  model_dict['acn_model'].decode(z)
+            z, u_q = model_dict['vq_acn_model'](data)
+            rec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
             u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
             #u_p = u_p_flat.view(args.num_examples, 4, 7, 7)
             #s_p = s_p_flat.view(args.num_examples, 4, 7, 7)
@@ -324,12 +324,12 @@ def daydream(model_dict, data_dict, info):
                 # see kld calculation - which is what defines std vs var
                 z_flat = u_p_flat+torch.exp(0.5*s_p_flat)*torch.randn(s_p_flat.shape).to(info['device'])
                 z = z_flat.view(args.num_examples, 4, 7, 7)
-                srec_dml =  model_dict['acn_model'].decode(z)
+                srec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
                 syhat = sample_from_discretized_mix_logistic(srec_dml, info['nr_logistic_mix'], only_mean=True)
                 npyhat = syhat.cpu().detach().numpy()
 
                 # encode result for next image
-                z, u_q = model_dict['acn_model'](syhat)
+                z, u_q = model_dict['vq_acn_model'](syhat)
                 u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
 
                 for ie in range(args.num_examples):
@@ -389,7 +389,7 @@ def sample_prior(model_dict, data_dict, info):
             model_dict = set_model_mode(model_dict, phase=phase)
             target = data = data[:args.num_examples].to(info['device'])
             z, u_q = model_dict['acn_model'](data)
-            rec_dml =  model_dict['acn_model'].decode(z)
+            rec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
             u_p_flat, s_p_flat = model_dict['prior_model'](u_q.view(args.num_examples, info['code_length']))
             u_p = u_p_flat.view(args.num_examples, 4, 7, 7)
             s_p = s_p_flat.view(args.num_examples, 4, 7, 7)
@@ -461,7 +461,7 @@ def call_plot(model_dict, data_dict, info):
             data_loader = data_dict[phase]
             for idx, (data, label, batch_index) in enumerate(data_loader):
                 fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-                model_dict, data, target, u_q, u_p, s_p, rec_dml, rec_yhat, pcnn_dml = fp_out
+                model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml = fp_out
                 bs = data.shape[0]
                 u_q_flat = u_q.view(bs, info['code_length'])
                 X = u_q_flat.cpu().numpy()
@@ -492,10 +492,11 @@ def sample(model_dict, data_dict, info):
                     break
                 bs = min([data.shape[0], 10])
                 fp_out = forward_pass(model_dict, data[:bs], label[:bs], batch_index[:bs], phase, info)
-                model_dict, data, target, u_q, u_p, s_p, rec_dml, rec_yhat, pcnn_dml = fp_out
+                model_dict, data, target, u_q,  u_p, s_p, rec_dml, z_e_x, z_q_x, latents, rec_yhat, pcnn_dml = fp_out
                 # teacher forced version
                 z_flat = u_q.view(bs, info['code_length'])
-                pcnn_yhat = model_dict['pcnn_decoder_model'](x=target, float_condition=z_flat, spatial_condition=rec_yhat)
+                pcnn_dml = model_dict['pcnn_decoder_model'](x=target, float_condition=z_flat, spatial_condition=rec_yhat.detach())
+                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
                 # create blank canvas for autoregressive sampling
                 np_target = data.detach().cpu().numpy()
                 np_rec_yhat = rec_yhat.detach().cpu().numpy()
@@ -544,7 +545,6 @@ def sample(model_dict, data_dict, info):
                 #vwrite(mname, building_canvas)
                 #print('finished %s'%mname)
                 ## only do one batch
-                break
 
 
 if __name__ == '__main__':
