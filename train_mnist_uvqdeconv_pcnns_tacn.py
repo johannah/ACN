@@ -34,7 +34,7 @@ from utils import set_model_mode, kl_loss_function, write_log_files
 from utils import discretized_mix_logistic_loss, sample_from_discretized_mix_logistic
 
 from pixel_cnn import GatedPixelCNN
-from acn_models import tPTPriorNetwork, ACNres
+from acn_models import tPTPriorNetwork, ACNVQVAEres
 from IPython import embed
 
 
@@ -94,12 +94,16 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
 
     # setup models
     # acn prior with vqvae embedding
-    acn_model = ACNres(code_len=info['code_length'],
+    vq_acn_model = ACNVQVAEres(code_len=info['code_length'],
                                input_size=info['input_channels'],
                                output_size=info['output_dim'],
                                encoder_output_size=info['encoder_output_size'],
                                hidden_size=info['hidden_size'],
+                               num_clusters=info['num_vqk'],
+                               num_z=info['num_z'],
                                ).to(info['device'])
+
+
 
     prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
@@ -117,7 +121,7 @@ def create_models(info, model_loadpath='', dataset_name='FashionMNIST'):
                                  output_projection_size=info['output_projection_size']).to(info['device'])
 
 
-    model_dict = {'acn_model':acn_model, 'prior_model':prior_model, 'pcnn_decoder_model':pcnn_decoder}
+    model_dict = {'vq_acn_model':vq_acn_model, 'prior_model':prior_model, 'pcnn_decoder_model':pcnn_decoder}
     parameters = []
     for name,model in model_dict.items():
         parameters+=list(model.parameters())
@@ -150,24 +154,26 @@ def forward_pass(model_dict, data, label, batch_index, phase, info):
     bs,c,h,w = target.shape
     model_dict['opt'].zero_grad()
     data = F.dropout(data, p=info['dropout_rate'], training=True, inplace=False)
-    z, u_q = model_dict['acn_model'](data)
+    z, u_q = model_dict['vq_acn_model'](data)
     u_q_flat = u_q.view(bs, info['code_length'])
     z_flat = z.view(bs, info['code_length'])
     if phase == 'train':
         # fit acn knn during training
         model_dict['prior_model'].update_codebook(batch_index, u_q_flat.detach())
-    rec_dml =  model_dict['acn_model'].decode(z)
+    rec_dml, z_e_x, z_q_x, latents =  model_dict['vq_acn_model'].decode(z)
     pcnn_dml = model_dict['pcnn_decoder_model'](x=data, spatial_condition=rec_dml)
     u_p, s_p = model_dict['prior_model'](u_q_flat)
     u_p = u_p.view(bs, 4, 7, 7)
     s_p = s_p.view(bs, 4, 7, 7)
-    return model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml
+    return model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml, z_e_x, z_q_x, latents
 
 def run(train_cnt, model_dict, data_dict, phase, info):
     st = time.time()
     loss_dict = {'running': 0,
              'kl':0,
              'pcnn_%s'%info['rec_loss_type']:0,
+              'vq':0,
+             'commit':0,
              'loss':0,
               }
     data_loader = data_dict[phase]
@@ -175,7 +181,7 @@ def run(train_cnt, model_dict, data_dict, phase, info):
     for idx, (data, label, batch_index) in enumerate(data_loader):
         bs,c,h,w = data.shape
         fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-        model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml = fp_out
+        model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml, z_e_x, z_q_x, latents = fp_out
         if idx == 0:
             log_ones = torch.zeros(bs, info['code_length']).to(info['device'])
         if bs != log_ones.shape[0]:
@@ -185,7 +191,10 @@ def run(train_cnt, model_dict, data_dict, phase, info):
                               reduction=info['reduction'])
         # no loss on deconv rec
         pcnn_loss = discretized_mix_logistic_loss(pcnn_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
-        loss = kl+pcnn_loss
+        vq_loss = F.mse_loss(z_q_x, z_e_x.detach(), reduction=info['reduction'])
+        commit_loss = F.mse_loss(z_e_x, z_q_x.detach(), reduction=info['reduction'])
+        commit_loss *= info['vq_commitment_beta']
+        loss = kl+pcnn_loss+commit_loss+vq_loss
         loss_dict['running']+=bs
         loss_dict['loss']+=loss.item()
         loss_dict['kl']+= kl.item()
@@ -197,8 +206,8 @@ def run(train_cnt, model_dict, data_dict, phase, info):
             train_cnt+=bs
         if idx == num_batches-2:
             # store example near end for plotting
-            pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-            rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+            pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
+            rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
             example = {'data':rescale_inv(data.detach().cpu()),
                        'target':rescale_inv(target.detach().cpu()),
                        'deconv_yhat':rescale_inv(rec_yhat.detach().cpu()),
@@ -274,7 +283,7 @@ def call_plot(model_dict, data_dict, info):
             data_loader = data_dict[phase]
             for idx, (data, label, batch_index) in enumerate(data_loader):
                 fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-                model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml = fp_out
+                model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml, z_e_x, z_q_x, latents = fp_out
                 bs = data.shape[0]
                 u_q_flat = u_q.view(bs, info['code_length'])
                 X = u_q_flat.cpu().numpy()
@@ -307,9 +316,8 @@ def sample(model_dict, data_dict, info):
                 iname = output_savepath + st_can + '_st%s'%info['sampling_temperature'] + '_sample_%s.png'%phase
                 bs = min([data.shape[0], 10])
                 fp_out = forward_pass(model_dict, data[:bs], label[:bs], batch_index[:bs], phase, info)
-                model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml = fp_out
+                model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml, z_e_x, z_q_x, latents = fp_out
                 # teacher forced version
-                z_flat = u_q.view(bs, info['code_length'])
                 pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
                 rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
                 # create blank canvas for autoregressive sampling
@@ -370,7 +378,7 @@ if __name__ == '__main__':
     parser.add_argument('--input_channels', default=1, type=int, help='num of channels of input')
     parser.add_argument('--target_channels', default=1, type=int, help='num of channels of target')
     parser.add_argument('--num_examples_to_train', default=50000000, type=int)
-    parser.add_argument('-e', '--exp_name', default='pcnn_spcond_udeconv_acn_res_convthruout_repq_bigprior', help='name of experiment')
+    parser.add_argument('-e', '--exp_name', default='pcnn_spcond_uvq_acn_res_convthruout_repq_bigprior', help='name of experiment')
     parser.add_argument('-dr', '--dropout_rate', default=0.0, type=float)
     parser.add_argument('-r', '--reduction', default='sum', type=str, choices=['sum', 'mean'])
     parser.add_argument('--rec_loss_type', default='dml', type=str, help='name of loss. options are dml', choices=['dml'])
@@ -384,7 +392,10 @@ if __name__ == '__main__':
     parser.add_argument('-cl', '--code_length', default=196, type=int)
     parser.add_argument('-k', '--num_k', default=5, type=int)
     parser.add_argument('--hidden_size', default=256, type=int)
-
+    # vq model setup
+    parser.add_argument('--vq_commitment_beta', default=0.25, help='scale for loss 3 in vqvae - how hard to enforce commitment to cluster')
+    parser.add_argument('--num_vqk', default=512, type=int)
+    parser.add_argument('--num_z', default=64, type=int)
     #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--encoder_output_size', default=784, help='output as a result of the flatten of the encoder - found experimentally')
