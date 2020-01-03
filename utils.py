@@ -369,12 +369,14 @@ def to_one_hot(tensor, n, fill_with=1.):
     one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
     return one_hot
 
-def sample_from_discretized_mix_logistic(l, nr_mix, only_mean=True, deterministic=False):
+def sample_from_discretized_mix_logistic(l, nr_mix, only_mean=True, deterministic=False, sampling_temperature=1.0):
     """
     TODO  explain input
     **** code for this function from https://github.com/pclucas14/pixel-cnn-pp/blob/master/utils.py
     l should be bt -1 and 1
+
     """
+    sampling_temperature = float(sampling_temperature)
     # Pytorch ordering
     l = l.permute(0, 2, 3, 1)
     ls = [int(y) for y in l.size()]
@@ -385,22 +387,26 @@ def sample_from_discretized_mix_logistic(l, nr_mix, only_mean=True, deterministi
     #from IPython import embed; embed()
     l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix * 2])
     # sample mixture indicator from softmax
-    temp = torch.FloatTensor(logit_probs.size())
-    if l.is_cuda : temp = temp.cuda()
-    temp.uniform_(1e-5, 1. - 1e-5)
+    noise = torch.FloatTensor(logit_probs.size())
+    if l.is_cuda : noise = noise.cuda()
+    noise.uniform_(1e-5, 1. - 1e-5)
     # hack to make deterministic JRH
     # could also just take argmax of logit_probs
-    if deterministic:
-        temp = temp*0.0+0.5
-    temp = logit_probs.data - torch.log(- torch.log(temp))
-    _, argmax = temp.max(dim=3)
+    if deterministic or only_mean:
+        # make temp small so logit_probs dominates equation
+        sampling_temperature = 1e-6
+    # sampling temperature from kk
+    # https://gist.github.com/kastnerkyle/ea08e1aed59a0896e4f7991ac7cdc147
+    # discussion on gumbel sm sampling -
+    # https://github.com/Rayhane-mamah/Tacotron-2/issues/155
+    noise = (logit_probs.data/sampling_temperature) - torch.log(- torch.log(noise))
+    _, argmax = noise.max(dim=3)
 
     one_hot = to_one_hot(argmax, nr_mix)
     sel = one_hot.view(xs[:-1] + [1, nr_mix])
     # select logistic parameters
     means = torch.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
-    log_scales = torch.clamp(torch.sum(
-        l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
+    log_scales = torch.clamp(torch.sum(l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
     # sample from logistic & clip to interval
     # we don't actually round to the nearest 8bit value when sampling
     u = torch.FloatTensor(means.size())
@@ -409,7 +415,6 @@ def sample_from_discretized_mix_logistic(l, nr_mix, only_mean=True, deterministi
     # hack to make deterministic
     if deterministic:
         u= u*0.0+0.5
-    #u = torch.Variable(u)
     if only_mean:
         x = means
     else:
