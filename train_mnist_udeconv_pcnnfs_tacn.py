@@ -309,8 +309,8 @@ def sample(model_dict, data_dict, info):
                 model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml = fp_out
                 # teacher forced version
                 z_flat = u_q.view(bs, info['code_length'])
-                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-                rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
+                rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
                 # create blank canvas for autoregressive sampling
                 np_target = data.detach().cpu().numpy()
                 np_rec_yhat = rec_yhat.detach().cpu().numpy()
@@ -318,13 +318,13 @@ def sample(model_dict, data_dict, info):
                 #canvas = deconv_yhat_batch
                 print('using zero output as sample canvas')
                 canvas = torch.zeros_like(rec_yhat)
-                st_can = '_zc'
+                st_can = '_zc' + '_st%s'%info['sampling_temperature']
                 for i in range(canvas.shape[1]):
                     for j in range(canvas.shape[2]):
                         print('sampling row: %s'%j)
                         for k in range(canvas.shape[3]):
                             output = model_dict['pcnn_decoder_model'](x=canvas, float_condition=z_flat, spatial_condition=rec_dml)
-                            output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'])
+                            output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
                             canvas[:,i,j,k] = output[:,i,j,k]
 
                 f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
@@ -396,6 +396,7 @@ if __name__ == '__main__':
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # sampling info
     parser.add_argument('-s', '--sample', action='store_true', default=False)
+    parser.add_argument('-st', '--sampling_temperature', default=0.1, help='temperature for sampling')
     # latent pca/tsne info
     parser.add_argument('--pca', action='store_true', default=False)
     parser.add_argument('--tsne', action='store_true', default=False)
