@@ -198,6 +198,8 @@ def run(train_cnt, model_dict, data_dict, phase, info):
         loss_dict['running']+=bs
         loss_dict['loss']+=loss.item()
         loss_dict['kl']+= kl.item()
+        loss_dict['vq']+= vq_loss.item()
+        loss_dict['commit']+= commit_loss.item()
         loss_dict['pcnn_%s'%info['rec_loss_type']]+=pcnn_loss.item()
         if phase == 'train':
             model_dict = clip_parameters(model_dict)
@@ -313,13 +315,13 @@ def sample(model_dict, data_dict, info):
                 for idx, (data, label, batch_index) in enumerate(data_loader):
                     break
                 st_can = '_zc'
-                iname = output_savepath + st_can + '_st%s'%info['sampling_temperature'] + '_sample_%s.png'%phase
+                iname = output_savepath + st_can + '_st%s'%args.sampling_temperature + '_sample_%s.png'%phase
                 bs = min([data.shape[0], 10])
                 fp_out = forward_pass(model_dict, data[:bs], label[:bs], batch_index[:bs], phase, info)
                 model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml, z_e_x, z_q_x, latents = fp_out
                 # teacher forced version
-                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
-                rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
+                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=args.sample_mean, sampling_temperature=args.sampling_temperature)
+                rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=args.sample_mean, sampling_temperature=args.sampling_temperature)
                 # create blank canvas for autoregressive sampling
                 np_target = data.detach().cpu().numpy()
                 np_rec_yhat = rec_yhat.detach().cpu().numpy()
@@ -332,7 +334,7 @@ def sample(model_dict, data_dict, info):
                         print('sampling row: %s'%j)
                         for k in range(canvas.shape[3]):
                             output = model_dict['pcnn_decoder_model'](x=canvas, spatial_condition=rec_dml)
-                            output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
+                            output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=args.sample_mean, sampling_temperature=args.sampling_temperature)
                             canvas[:,i,j,k] = output[:,i,j,k]
 
                 f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
@@ -406,7 +408,7 @@ if __name__ == '__main__':
     parser.add_argument('--base_datadir', default='../dataset/', help='save datasets here')
     # sampling info
     parser.add_argument('-s', '--sample', action='store_true', default=False)
-    parser.add_argument('-st', '--sampling_temperature', default=1.0, help='temperature to sample dml')
+    parser.add_argument('-st', '--sampling_temperature', default=0.1, help='temperature to sample dml')
     # latent pca/tsne info
     parser.add_argument('--pca', action='store_true', default=False)
     parser.add_argument('--tsne', action='store_true', default=False)
