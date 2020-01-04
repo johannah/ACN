@@ -186,6 +186,7 @@ def run(train_cnt, model_dict, data_dict, phase, info):
                               reduction=info['reduction'])
         # no loss on deconv rec
         pcnn_loss = discretized_mix_logistic_loss(pcnn_dml, target, nr_mix=info['nr_logistic_mix'], reduction=info['reduction'])/2.0
+        kl *= info['kl_beta']
         loss = kl+pcnn_loss
         loss_dict['running']+=bs
         loss_dict['loss']+=loss.item()
@@ -309,8 +310,8 @@ def sample(model_dict, data_dict, info):
                 model_dict, data, target, u_q, u_p, s_p, rec_dml, pcnn_dml = fp_out
                 # teacher forced version
                 z_flat = u_q.view(bs, info['code_length'])
-                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
-                rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
+                pcnn_yhat = sample_from_discretized_mix_logistic(pcnn_dml, info['nr_logistic_mix'], only_mean=args.sample_mean, sampling_temperature=args.sampling_temperature)
+                rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'],   only_mean=args.sample_mean, sampling_temperature=args.sampling_temperature)
                 # create blank canvas for autoregressive sampling
                 np_target = data.detach().cpu().numpy()
                 np_rec_yhat = rec_yhat.detach().cpu().numpy()
@@ -324,7 +325,7 @@ def sample(model_dict, data_dict, info):
                         print('sampling row: %s'%j)
                         for k in range(canvas.shape[3]):
                             output = model_dict['pcnn_decoder_model'](x=canvas, float_condition=z_flat, spatial_condition=rec_dml)
-                            output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
+                            output = sample_from_discretized_mix_logistic(output.detach(), info['nr_logistic_mix'], only_mean=args.sample_mean, sampling_temperature=args.sampling_temperature)
                             canvas[:,i,j,k] = output[:,i,j,k]
 
                 f,ax = plt.subplots(bs, 4, sharex=True, sharey=True, figsize=(3,bs))
@@ -386,7 +387,7 @@ if __name__ == '__main__':
     parser.add_argument('-k', '--num_k', default=5, type=int)
     parser.add_argument('--hidden_size', default=256, type=int)
 
-    #parser.add_argument('-kl', '--kl_beta', default=.5, type=float, help='scale kl loss')
+    parser.add_argument('-kl', '--kl_beta', default=1, type=float, help='scale kl loss')
     parser.add_argument('--last_layer_bias', default=0.0, help='bias for output decoder - should be 0 for dml')
     parser.add_argument('--encoder_output_size', default=784, help='output as a result of the flatten of the encoder - found experimentally')
     parser.add_argument('-sm', '--sample_mean', action='store_true', default=False)
