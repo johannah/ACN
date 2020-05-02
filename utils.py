@@ -1,62 +1,40 @@
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import torch
+import numpy as np
 import os
 import sys
-import numpy as np
 from glob import glob
 from shutil import copyfile
-
+from torchvision import datasets, transforms
 import torch
 from torch.nn import functional as F
-from torchvision import datasets, transforms
 from torch.utils.data import Dataset, DataLoader
 from torchvision.utils import save_image
 
+
+
 from IPython import embed
 
+def set_parameter_requires_grad(model, feature_extracting):
+    if feature_extracting:
+        for param in model.parameters():
+            param.requires_grad = False
 
-class IndexedDataset(Dataset):
-    def __init__(self, dataset_function, path, train=True, download=True, transform=transforms.ToTensor()):
-        """ class to provide indexes into the data -- needed for ACN prior
-        """
-        self.indexed_dataset = dataset_function(path,
-                             download=download,
-                             train=train,
-                             transform=transform)
+def set_model_mode(model_dict, phase):
+    for name in model_dict.keys():
+        if phase == 'train':
+            model_dict[name].train()
+        else:
+            model_dict[name].eval()
+    return model_dict
 
-    def __getitem__(self, index):
-        data, target = self.indexed_dataset[index]
-        return data, target, index
-
-    def __len__(self):
-        return len(self.indexed_dataset)
-
-def save_checkpoint(state, filename='model.pt'):
-    print("starting save of model %s" %filename)
-    torch.save(state, filename)
-    print("finished save of model %s" %filename)
-
-def create_mnist_datasets(dataset_name, base_datadir, batch_size, dataset_transforms):
-    dataset = eval('datasets.'+dataset_name)
-    datadir = os.path.join(base_datadir, dataset_name)
-    train_data = IndexedDataset(dataset, path=datadir,
-                                train=True, download=True,
-                                transform=dataset_transforms)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-    valid_data = IndexedDataset(dataset, path=datadir,
-                               train=False, download=True,
-                               transform=dataset_transforms)
-    valid_loader = DataLoader(valid_data, batch_size=batch_size, shuffle=True)
-    data_dict = {'train':train_loader, 'valid':valid_loader}
-    nchans,hsize,wsize = data_dict['train'].dataset[0][0].shape
-    size_training_set = len(train_data)
-    return data_dict, size_training_set, nchans, nchans, hsize, wsize
-
-def create_new_info_dict(arg_dict, base_filepath):
+def create_new_info_dict(arg_dict, base_filepath, base_file):
     if not os.path.exists(base_filepath):
         os.makedirs(base_filepath)
-    info = {'train_cnts':[],
+    info = {'base_file':base_file,
+            'train_cnts':[],
             'train_losses':{},
             'valid_losses':{},
             'save_times':[],
@@ -88,17 +66,27 @@ def plot_example(img_filepath, example, plot_on=[], num_plot=10):
     if not len(plot_on):
         # plot all
         plot_on = sorted(example.keys())
-    for cnt, pon in enumerate(plot_on):
+    n_cols = len(plot_on)
+    f, ax = plt.subplots(num_plot, n_cols)
+    for col, pon in enumerate(plot_on):
         bs,c,h,w = example[pon].shape
         num_plot = min([bs, num_plot])
-        eimgs = example[pon].view(bs,c,h,w)[:num_plot]
-        print('plotting', pon, eimgs.min(), eimgs.max())
-        if not cnt:
-            comparison = eimgs
-        else:
-            comparison = torch.cat([comparison, eimgs])
-    save_image(comparison.cpu(), img_filepath, nrow=num_plot)
+        for row in range(num_plot):
+            if not row:
+                ax[row,col].set_title(pon)
+            if c == 1:
+                ax[row, col].matshow(example[pon][row,0])
+            if c == 3:
+                ax[row, col].matshow(example[pon][row])
+            #print(row,pon,example[pon][row].min(),example[pon][row].max())
+            ax[row,col].set_xticks([])
+            ax[row,col].set_yticks([])
+            ax[row,col].set_xticklabels([])
+            ax[row,col].set_yticklabels([])
+    plt.subplots_adjust(wspace=0, hspace=0)       #else:
+    plt.savefig(img_filepath)
     print('writing comparison image: %s img_path'%img_filepath)
+    plt.close()
 
 def count_parameters(model):
     # https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
@@ -111,6 +99,7 @@ def rolling_average(a, n=5) :
     ret = np.cumsum(a, dtype=float)
     ret[n:] = ret[n:] - ret[:-n]
     return ret[n - 1:] / n
+
 
 def write_log_files(info):
     basename = os.path.split(info['base_filepath'])[1]
@@ -129,6 +118,7 @@ def write_log_files(info):
         to_path = os.path.join(bdir, fname)
         copyfile(f, to_path)
         print(f, to_path)
+
 
 def plot_losses(train_cnts, train_losses, test_losses, name='loss_example.png', rolling_length=4):
     nf = len(train_losses.keys())
@@ -255,10 +245,11 @@ def set_model_mode(model_dict, phase):
                 model_dict[name].train()
     return model_dict
 
-def kl_normal(mu_0, log_var_0, mu_1, log_var_1):
-    # from https://gist.github.com/Kaixhin/9c90221aae216f59ca2594ea000b0afe
-    kl = (2 * (log_var_1 - log_var_0)).exp() + ((mu_1 - mu_0) / log_var_0.exp()) ** 2 - 2 * (log_var_1 - log_var_0) - 1
-    return 0.5 * kl.sum(1).mean()
+def save_checkpoint(state, filename='model.pt'):
+    print("starting save of model %s" %filename)
+    torch.save(state, filename)
+    print("finished save of model %s" %filename)
+
 
 def kl_loss_function(u_q, s_q, u_p, s_p, reduction='sum'):
     ''' reconstruction loss + coding cost
@@ -358,6 +349,8 @@ def discretized_mix_logistic_loss(prediction, target, nr_mix=10, reduction='mean
         dml_loss = -lse.mean()
     elif reduction == 'sum':
         dml_loss = -lse.sum()
+    elif reduction == None:
+        dml_loss = -lse
     else:
         raise ValueError('reduction not known')
     return dml_loss
@@ -384,7 +377,6 @@ def sample_from_discretized_mix_logistic(l, nr_mix, only_mean=True, deterministi
 
     # unpack parameters
     logit_probs = l[:, :, :, :nr_mix]
-    #from IPython import embed; embed()
     l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix * 2])
     # sample mixture indicator from softmax
     noise = torch.FloatTensor(logit_probs.size())
@@ -442,5 +434,39 @@ def log_prob_from_logits(x):
     axis = len(x.size()) - 1
     m, _ = torch.max(x, dim=axis, keepdim=True)
     return x - m - torch.log(torch.sum(torch.exp(x - m), dim=axis, keepdim=True))
+
+class IndexedDataset(Dataset):
+    def __init__(self, dataset_function, path, train=True, download=True, transform=transforms.ToTensor()):
+        """ class to provide indexes into the data -- needed for ACN prior
+        """
+        self.indexed_dataset = dataset_function(path,
+                             download=download,
+                             train=train,
+                             transform=transform)
+
+    def __getitem__(self, index):
+        data, target = self.indexed_dataset[index]
+        return data, target, index
+
+    def __len__(self):
+        return len(self.indexed_dataset)
+
+
+
+def create_mnist_datasets(dataset_name, base_datadir, batch_size, dataset_transforms):
+    dataset = eval('datasets.'+dataset_name)
+    datadir = os.path.join(base_datadir, dataset_name)
+    train_data = IndexedDataset(dataset, path=datadir,
+                                train=True, download=True,
+                                transform=dataset_transforms)
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    valid_data = IndexedDataset(dataset, path=datadir,
+                               train=False, download=True,
+                               transform=dataset_transforms)
+    valid_loader = DataLoader(valid_data, batch_size=batch_size, shuffle=True)
+    data_dict = {'train':train_loader, 'valid':valid_loader}
+    nchans,hsize,wsize = data_dict['train'].dataset[0][0].shape
+    size_training_set = len(train_data)
+    return data_dict, size_training_set, nchans, nchans, hsize, wsize
 
 
