@@ -53,6 +53,8 @@ def create_models(info, model_loadpath=''):
     largs = info['args']
     # load model if given a path
     if model_loadpath !='':
+        if os.path.exists(model_loadpath+'.cd'):
+            model_loadpath = model_loadpath+'.cd'
         _dict = torch.load(model_loadpath, map_location=lambda storage, loc:storage)
         dinfo = _dict['info']
         pkeys = info.keys()
@@ -80,9 +82,9 @@ def create_models(info, model_loadpath=''):
     info['hsize'] = hsize
     info['wsize'] = wsize
 
+
     if not loaded:
         info['size_training_set'] = size_training_set
-
 
     # pixel cnn architecture is dependent on loss
     # for dml prediction, need to output mixture of size nmix
@@ -108,7 +110,6 @@ def create_models(info, model_loadpath=''):
 
     prior_model = tPTPriorNetwork(size_training_set=info['size_training_set'],
                                code_length=info['code_length'], k=info['num_k']).to(info['device'])
-    prior_model.codes = prior_model.codes.to(info['device'])
 
     model_dict = {'acn_model':acn_model, 'prior_model':prior_model}
     parameters = []
@@ -120,26 +121,13 @@ def create_models(info, model_loadpath=''):
 
     if model_loadpath !='':
         for name, model in model_dict.items():
-            lname = name+'_state_dict'
-            # some old models were saved with vq
-            if lname == 'acn_model_state_dict' and lname not in _dict.keys():
-                lname = 'vq_acn_model_state_dict'
             if '_model' in name:
+                lname = name+'_state_dict'
                 model_dict[name].load_state_dict(_dict[lname])
-        if 'codes' in _dict.keys():
-            model_dict['prior_model'].codes = _dict['codes']
-        else:
-            # find codes
-            model_dict = set_codes_from_model(data_dict, model_dict, info)
-            state_dict = {}
-            for key, model in model_dict.items():
-                state_dict[key+'_state_dict'] = model.state_dict()
-            info['train_cnts'].append(train_cnt)
-            info['epoch_cnt'] = epoch_cnt
-            state_dict['codes'] = model_dict['prior_model'].codes
-            state_dict['info'] = info
-            save_checkpoint(state_dict, filename=model_loadpath+'.cd')
-
+        same = (_dict['codes'] == model_dict['prior_model'].codes.cpu()).sum().item()
+        # make sure that loaded codes are the same
+        #model_dict = set_codes_from_model(data_dict, model_dict, info)
+        assert same == _dict['codes'].shape[0]* _dict['codes'].shape[1]
     return model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv
 
 def set_codes_from_model(data_dict, model_dict, info):
@@ -148,10 +136,8 @@ def set_codes_from_model(data_dict, model_dict, info):
     for idx, (data, label, batch_index) in enumerate(data_loader):
         for key in model_dict.keys():
             model_dict[key].zero_grad()
-
         forward_pass(model_dict, data, label, batch_index, 'train', info)
     return model_dict
-
 
 def account_losses(loss_dict):
     ''' return avg losses for each loss sum in loss_dict based on total examples in running key'''
@@ -186,10 +172,10 @@ def forward_pass(model_dict, data, label, batch_indexes, phase, info):
     s_p = s_p.view(bs, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)
     if info['vq_decoder']:
         rec_dml, z_e_x, z_q_x, latents =  model_dict['acn_model'].decode(z)
-        return model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml, z_e_x, z_q_x, latents
+        return model_dict, data, target, rec_dml, u_q, u_p, s_p, z_e_x, z_q_x, latents
     else:
         rec_dml =  model_dict['acn_model'].decode(z)
-        return model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml
+        return model_dict, data, target, rec_dml, u_q, u_p, s_p
 
 def run(train_cnt, model_dict, data_dict, phase, info):
     st = time.time()
@@ -216,9 +202,9 @@ def run(train_cnt, model_dict, data_dict, phase, info):
             model_dict[key].zero_grad()
         fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
         if info['vq_decoder']:
-            model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml, z_e_x, z_q_x, latents = fp_out
+            model_dict, data, target, rec_dml, u_q, u_p, s_p, z_e_x, z_q_x, latents = fp_out
         else:
-            model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml = fp_out
+            model_dict, data, target, rec_dml, u_q, u_p, s_p = fp_out
         bs,c,h,w = data.shape
         if batch_cnt == 0:
             log_ones = torch.zeros(bs, info['code_length']).to(info['device'])
@@ -259,7 +245,6 @@ def run(train_cnt, model_dict, data_dict, phase, info):
                   'target':data.detach().cpu().numpy(),
                   'rec':rec_yhat.detach().cpu().numpy(),
                    }
-        #print(prof)
         if not batch_cnt % 100:
             print(train_cnt, batch_cnt, account_losses(loss_dict))
             print(phase, 'cuda', torch.cuda.memory_allocated(device=None))
@@ -332,119 +317,125 @@ def call_plot(model_dict, data_dict, info, tsne, pca):
     from sklearn.cluster import KMeans
     # always be in eval mode - so we dont swap neighbors
     model_dict = set_model_mode(model_dict, 'valid')
+    srandom_state = np.random.RandomState(1234)
     with torch.no_grad():
-        #for phase in ['valid', 'train']:
         for phase in ['train', 'valid']:
-            data_loader = data_dict[phase]
-            for idx, (data, label, batch_index) in enumerate(data_loader):
+            batch_index = srandom_state.randint(0,len(data_dict[phase].dataset),info['batch_size'])
+            print(batch_index)
+            data = torch.stack([data_dict[phase].dataset.indexed_dataset[index][0] for index in batch_index])
+            label = torch.stack([data_dict[phase].dataset.indexed_dataset[index][1] for index in batch_index])
+            batch_index = torch.LongTensor(batch_index)
+            data = torch.FloatTensor(data)
+            fp_out = forward_pass(model_dict, data, label, batch_index, 'valid', info)
+            if info['vq_decoder']:
+                model_dict, data, target, rec_dml, u_q, u_p, s_p, z_e_x, z_q_x, latents = fp_out
+            else:
+                model_dict, data, target, rec_dml, u_q, u_p, s_p = fp_out
 
-                fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+            bs,c,h,w=data.shape
+            rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
+            data = data.detach().cpu().numpy()
+            rec = rec_yhat.detach().cpu().numpy()
+            u_q_flat = u_q.view(bs, info['code_length'])
+            # choose limited number to plot
+            n = min([20,bs])
+            n_neighbors = args.num_k
+            all_neighbor_distances, all_neighbor_indexes = model_dict['prior_model'].kneighbors(u_q_flat, n_neighbors=n_neighbors)
+            all_neighbor_indexes = all_neighbor_indexes.cpu().numpy()
+            all_neighbor_distances = all_neighbor_distances.cpu().numpy()
+
+            n_cols = 2+n_neighbors
+            tbatch_index = batch_index.cpu().numpy()
+            np_label = label.cpu().numpy()
+            #for i in np.arange(0,n*2,2):
+            for i in np.arange(0,n):
+                # plot each base image
+                plt_path = info['model_loadpath'].replace('.pt', '_batch_rec_neighbors_%s_%06d_plt.png'%(phase,tbatch_index[i]))
+                # bi 5136
+                neighbor_indexes = all_neighbor_indexes[i]
+                code = u_q[i].view((1, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)).cpu().numpy()
+                f,ax = plt.subplots(4,n_cols)
+                ax[0,0].set_title('L%sI%s'%(np_label[i], tbatch_index[i]))
+                ax[0,0].set_ylabel('true')
+                ax[0,0].matshow(data[i,0])
+                ax[1,0].set_title('I%s'%tbatch_index[i])
+                ax[1,0].set_ylabel('rec')
+                ax[1,0].matshow(rec[i,0])
+                ax[2,0].matshow(code[0,0])
+                ax[3,0].matshow(code[0,1])
+
+                neighbor_data = torch.stack([data_dict['train'].dataset.indexed_dataset[index][0] for index in neighbor_indexes])
+                neighbor_label = torch.stack([data_dict['train'].dataset.indexed_dataset[index][1] for index in neighbor_indexes])
+                # u_q_flat
+                neighbor_codes_flat = model_dict['prior_model'].codes[neighbor_indexes]
+                neighbor_codes = neighbor_codes_flat.view(n_neighbors, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)
                 if info['vq_decoder']:
-                    model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml, z_e_x, z_q_x, latents = fp_out
+                    neighbor_rec_dml, _, _, _ =  model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
                 else:
-                    model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml = fp_out
-
-                bs,c,h,w=data.shape
-                rec_yhat = sample_from_discretized_mix_logistic(rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature'])
-                data = data.detach().cpu().numpy()
-                rec = rec_yhat.detach().cpu().numpy()
-                u_q_flat = u_q.view(bs, info['code_length'])
-                n = min([20,bs])
-
-                n_neighbors = args.num_k
-                all_neighbor_distances, all_neighbor_indexes = model_dict['prior_model'].kneighbors(u_q_flat, n_neighbors=n_neighbors)
-                all_neighbor_indexes = all_neighbor_indexes.cpu().numpy()
-                all_neighbor_distances = all_neighbor_distances.cpu().numpy()
-
-                n_cols = 2+n_neighbors
-                u_q_np = deepcopy(u_q.cpu().numpy())
-                umin = u_q_np.min()
-                umax = u_q_np.max()
-                u_q_np = (u_q_np-umin)/(umax-umin)
-
-                nbatch_index = batch_index.cpu().numpy()
-                for i in np.arange(0,n*2,2):
-                    # bi 5136
-                    neighbor_indexes = all_neighbor_indexes[i]
-                    code = u_q[i].view((1, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)).cpu().numpy()
-                    f,ax = plt.subplots(4,n_cols)
-                    ax[0,0].set_title('t%s'%nbatch_index[i])
-                    ax[0,0].matshow(data[i,0])
-                    ax[1,0].set_title('rec')
-                    ax[1,0].matshow(rec[i,0])
-                    ax[2,0].matshow(code[0,0])
-                    ax[3,0].matshow(code[0,1])
-                    neighbor_data = torch.stack([data_dict['train'].dataset.indexed_dataset[index][0] for index in neighbor_indexes])
-                    neighbor_labels = torch.stack([data_dict['train'].dataset.indexed_dataset[index][1] for index in neighbor_indexes])
-                    # u_q_flat
-                    neighbor_codes_flat = model_dict['prior_model'].codes[neighbor_indexes]
-                    neighbor_codes = neighbor_codes_flat.view(n_neighbors, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)
-                    if info['vq_decoder']:
-                        neighbor_rec_dml, _, _, _ =  model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
-                    else:
-                        neighbor_rec_dml =  model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
-                    neighbor_rec_yhat = sample_from_discretized_mix_logistic(neighbor_rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature']).cpu().numpy()
-                    neighbor_data = ((neighbor_data*2)-1).cpu().numpy()
-                    neighbor_codes = neighbor_codes.cpu().numpy()
-                    for ni in range(n_neighbors):
-                        index = all_neighbor_indexes[i,ni].item()
-                        neighbor_label = neighbor_labels[ni]
-                        ax[0,ni+2].set_title('%s %s'%(neighbor_label.cpu().numpy(), index))
-                        ax[0,ni+2].matshow(neighbor_data[ni,0])
-                        ax[1,ni+2].matshow(neighbor_rec_yhat[ni,0])
-                        ax[2,ni+2].matshow(neighbor_codes[ni,0])
-                        ax[3,ni+2].matshow(neighbor_codes[ni,1])
-
-                    [ax[0,col].axis('off') for col in range(n_cols)]
-                    [ax[1,col].axis('off') for col in range(n_cols)]
-                    [ax[2,col].axis('off') for col in range(n_cols)]
-                    [ax[3,col].axis('off') for col in range(n_cols)]
-                    plt.subplots_adjust(wspace=0, hspace=0)
-                    plt.tight_layout()
-                    plt_path = info['model_loadpath'].replace('.pt', '_neighbors_%s_%06d_plt.png'%(phase,nbatch_index[i]))
-                    print('plotting', plt_path)
-                    plt.savefig(plt_path)
-                    plt.close()
-                X = u_q_flat.cpu().numpy()
-                km = KMeans(n_clusters=10)
-                y = km.fit_predict(X)
-                # color points based on clustering, label, or index
-                color = y#label.cpu().numpy() #y#batch_indexes
-                if tsne:
-                    param_name = '_tsne_%s_P%s.html'%(phase, info['perplexity'])
-                    html_path = info['model_loadpath'].replace('.pt', param_name)
+                    neighbor_rec_dml = model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
+                neighbor_data = neighbor_data.cpu().numpy()
+                neighbor_rec_yhat = sample_from_discretized_mix_logistic(neighbor_rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature']).cpu().numpy()
+                for ni in range(n_neighbors):
+                    nindex = all_neighbor_indexes[i,ni].item()
+                    nlabel = neighbor_label[ni].cpu().numpy()
+                    ncode = neighbor_codes[ni].cpu().numpy()
+                    ax[0,ni+2].set_title('L%sI%s'%(nlabel, nindex))
+                    ax[0,ni+2].matshow(neighbor_data[ni,0])
+                    ax[1,ni+2].matshow(neighbor_rec_yhat[ni,0])
+                    ax[2,ni+2].matshow(ncode[0])
+                    ax[3,ni+2].matshow(ncode[1])
+                ax[2,0].set_ylabel('lc0')
+                ax[3,0].set_ylabel('lc1')
+                [ax[xx,0].set_xticks([]) for xx in range(4)]
+                [ax[xx,0].set_yticks([]) for xx in range(4)]
+                for xx in range(4):
+                    [ax[xx,col].axis('off') for col in range(1, n_cols)]
+                plt.subplots_adjust(wspace=0, hspace=0)
+                plt.tight_layout()
+                print('plotting', plt_path)
+                plt.savefig(plt_path)
+                plt.close()
+            X = u_q_flat.cpu().numpy()
+            #km = KMeans(n_clusters=10)
+            #y = km.fit_predict(X)
+            # color points based on clustering, label, or index
+            color = label.cpu().numpy() #y #batch_indexes
+            if tsne:
+                param_name = '_tsne_%s_P%s.html'%(phase, info['perplexity'])
+                html_path = info['model_loadpath'].replace('.pt', param_name)
+                if not os.path.exists(html_path):
                     tsne_plot(X=X, images=data[:,0], color=color,
                           perplexity=info['perplexity'],
                           html_out_path=html_path, serve=False)
-                if pca:
-                    param_name = '_pca_%s.html'%(phase)
-                    html_path = info['model_loadpath'].replace('.pt', param_name)
+            if pca:
+                param_name = '_pca_%s.html'%(phase)
+                html_path = info['model_loadpath'].replace('.pt', param_name)
+                if not os.path.exists(html_path):
                     pca_plot(X=X, images=data[:,0], color=color,
                               html_out_path=html_path, serve=False)
 
-                break
 
-def save_latents(model_dict, data_dict, info):
+def save_latents(l_filepath, model_dict, data_dict, info):
     # always be in eval mode - so we dont swap neighbors
-    model_dict = set_model_mode(model_dict, 'valid')
-    results = {}
     all_vq_latents = []
     with torch.no_grad():
-        for phase in ['valid', 'train']:
-            data_loader = data_dict[phase]
-            for idx, (data, label, batch_index) in enumerate(data_loader):
-                fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
-                if info['vq_decoder']:
-                    model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml, z_e_x, z_q_x, latents = fp_out
-                else:
-                    model_dict, data, target, rec_dml, u_q, u_p, s_p, rec_dml = fp_out
-                bs,c,h,w=data.shape
-                u_q_flat = u_q.view(bs, info['code_length'])
-                n_neighbors = args.num_k
-                neighbor_distances, neighbor_indexes = model_dict['prior_model'].kneighbors(u_q_flat, n_neighbors=n_neighbors)
-                try:
+        for phase in ['train','valid']:
+            if not os.path.exists(l_filepath+'_%s.npz'%phase):
+                model_dict = set_model_mode(model_dict, 'valid')
+                data_loader = data_dict[phase]
+                for idx, (data, label, batch_index) in enumerate(data_loader):
+                    fp_out = forward_pass(model_dict, data, label, batch_index, phase, info)
+                    if info['vq_decoder']:
+                        model_dict, data, target, rec_dml, u_q, u_p, s_p, z_e_x, z_q_x, latents = fp_out
+                    else:
+                        model_dict, data, target, rec_dml, u_q, u_p, s_p = fp_out
+                    bs,c,h,w=data.shape
+                    u_q_flat = u_q.view(bs, info['code_length'])
+                    n_neighbors = info['num_k']
+                    neighbor_distances, neighbor_indexes = model_dict['prior_model'].kneighbors(u_q_flat, n_neighbors=n_neighbors)
                     if not idx:
                         all_indexes = batch_index.cpu().numpy()
+                        all_labels = label.cpu().numpy()
                         all_acn_uq = u_q.cpu().numpy()
                         all_neighbors = neighbor_indexes.cpu().numpy()
                         all_neighbor_distances = neighbor_distances.cpu().numpy()
@@ -452,84 +443,109 @@ def save_latents(model_dict, data_dict, info):
                             all_vq_latents = latents.cpu().numpy()
                     else:
                         all_indexes = np.append(all_indexes, batch_index.cpu().numpy())
+                        all_labels = np.append(all_labels, label.cpu().numpy())
                         all_acn_uq = np.vstack((all_acn_uq, u_q.cpu().numpy()))
                         all_neighbors = np.vstack((all_neighbors, neighbor_indexes.cpu().numpy()))
                         all_neighbor_distances = np.vstack((all_neighbor_distances,
                                                             neighbor_distances.cpu().numpy()))
                         if info['vq_decoder']:
                             all_vq_latents = np.vstack((all_vq_latents, latents.cpu().numpy()))
-                except:
-                    embed()
-
-                print('finished', all_neighbors.shape[0])
-            results['valid'] = {'index':all_indexes, 'acn_uq':all_acn_uq,
-                                'neighbor_train_indexes':all_neighbors,
-                                'neighbor_distances':all_neighbor_distances,
-                                'vq_latents':all_vq_latents}
-
-        base_filepath = info['base_filepath']
-        base_filename = os.path.split(info['base_filepath'])[1]
-        l_filepath = os.path.join(base_filepath, "%s_%010d_output"%(base_filename, info['train_cnts'][-1]))
-        np.savez(l_filepath, results)
-
-def latent_walk(model_dict, data_dict, info):
-    from skvideo.io import vwrite
-    model_dict = set_model_mode(model_dict, 'valid')
-    output_savepath = args.model_loadpath.replace('.pt', '')
-    phase = 'train'
-    data_loader = data_dict[phase]
-    bs = args.num_walk_steps
-    with torch.no_grad():
-        for walki in range(10):
-            for idx, (data, label, batch_idx) in enumerate(data_loader):
-                # limit number of samples
-                lim = min([data.shape[0], 10])
-                target = data = data[:lim].to(info['device'])
-                z, u_q, s_q = model_dict['encoder_model'](data)
-                break
-            _,c,h,w=target.shape
-            latents = torch.zeros((bs,z.shape[1]))
-            si = 0; ei = 1
-            sl = label[si].item(); el = label[ei].item()
-            print('walking from %s to %s'%(sl, el))
-            for code_idx in range(z.shape[1]):
-                s = z[si,code_idx]
-                e = z[ei,code_idx]
-                code_walk = torch.linspace(s,e,bs)
-                latents[:,code_idx] = code_walk
-            latents = latents.to(info['device'])
-            output = model_dict['conv_decoder'](latents)
-            npst = target[si:si+1].detach().cpu().numpy()
-            npen = target[ei:ei+1].detach().cpu().numpy()
-            if info['rec_loss_type'] == 'dml':
-                output = sample_from_discretized_mix_logistic(output, info['nr_logistic_mix'], only_mean=info['sample_mean'])
-            npwalk = output.detach().cpu().numpy()
-            # add multiple frames of each sample as a hacky way to make the
-            # video more interpretable to humans
-            walk_video = np.concatenate((npst, npst,
-                                         npst, npst,
-                                         npst, npst))
-            for ww in range(npwalk.shape[0]):
-                walk_video = np.concatenate((walk_video,
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             npwalk[ww:ww+1], npwalk[ww:ww+1],
-                                             ))
-            walk_video = np.concatenate((walk_video,
-                                         npen, npen,
-                                         npen, npen,
-                                         npen, npen))
-            walk_video = (walk_video*255).astype(np.uint8)
-            ## make movie
-            print('writing walk movie')
-            mname = output_savepath + '%s_s%s_e%s_walk.mp4'%(walki,sl,el)
-            vwrite(mname, walk_video)
-            print('finished %s'%mname)
+                    print('finished save latents', all_neighbors.shape[0])
+                    np.savez(l_filepath+'_'+phase,
+                                   index=all_indexes,
+                                   labels=all_labels,
+                                   acn_uq=all_acn_uq,
+                                   neighbor_train_indexes=all_neighbors,
+                                   neighbor_distances=all_neighbor_distances,
+                                   vq_latents=all_vq_latents)
 
 
+    train_results = np.load(l_filepath+'_train.npz')
+    valid_results = np.load(l_filepath+'_valid.npz')
+    return train_results, valid_results
 
+def classify_latents(basepath, train_results, valid_results):
+    from sklearn.neighbors import KNeighborsClassifier
+    uqv_fp = basepath+'_valid_acn_cm.png'
+    uqt_fp = basepath+'_train_acn_cm.png'
+    print('finding knn on latents')
+    tds,c,h,w = train_results['acn_uq'].shape
+    vds,c,h,w = valid_results['acn_uq'].shape
+    uq_train_X = train_results['acn_uq'].reshape((tds,c*h*w))
+    uq_valid_X = valid_results['acn_uq'].reshape((vds,c*h*w))
 
+    train_y = train_results['labels']
+    valid_y = valid_results['labels']
+    label_names = sorted(set(valid_y))
 
+    uq_knn = KNeighborsClassifier(n_neighbors=info['num_k'])
+    uq_knn.fit(uq_train_X, train_y)
+    if not os.path.exists(uqv_fp):
+        uq_pred_valid_y = uq_knn.predict(uq_valid_X)
+        plot_confusion_matrix(valid_y, uq_pred_valid_y, label_names, normalize=False, filename=uqv_fp)
+
+    if not os.path.exists(uqt_fp):
+        uq_pred_train_y = uq_knn.predict(uq_train_X)
+        plot_confusion_matrix(train_y, uq_pred_train_y, label_names, normalize=False, filename=uqt_fp)
+
+def plot_confusion_matrix(y_true, y_pred, classes,
+                          normalize=False,
+                          title=None,
+                          cmap=plt.cm.Blues, filename='confusion.png'):
+    """
+    This function prints and plots the confusion matrix.
+    Normalization can be applied by setting `normalize=True`.
+    """
+    from sklearn.metrics import confusion_matrix, accuracy_score
+    from sklearn.utils.multiclass import unique_labels
+    np.set_printoptions(precision=2)
+    print("starting plotting confusion", filename)
+    acc = accuracy_score(y_true, y_pred)
+    if not title:
+        if normalize:
+            title = 'Normalized Acc %.02f'%acc
+        else:
+            title = 'Acc %.02f'%acc
+
+    # Compute confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    # Only use the labels that appear in the data
+    classes = [classes[n] for n in list(unique_labels(y_true, y_pred))]
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        print("Normalized confusion matrix")
+    else:
+        print('Confusion matrix, without normalization')
+    print(cm)
+    fig, ax = plt.subplots(figsize=(20,20))
+    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
+    ax.figure.colorbar(im, ax=ax)
+    # We want to show all ticks...
+    ax.set(xticks=np.arange(cm.shape[1]),
+           yticks=np.arange(cm.shape[0]),
+           # ... and label them with the respective list entries
+           xticklabels=classes, yticklabels=classes,
+           title=title,
+           ylabel='True label',
+           xlabel='Predicted label')
+
+    # Rotate the tick labels and set their alignment.
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+             rotation_mode="anchor")
+
+    # Loop over data dimensions and create text annotations.
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, format(cm[i, j], fmt),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    fig.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+    print("finished plotting confusion", filename)
+    return cm
 
 if __name__ == '__main__':
     from argparse import ArgumentParser
@@ -589,14 +605,32 @@ if __name__ == '__main__':
     # get naming scheme
     loaded = True
     if args.eval_experiment:
-        model_paths = sorted(glob(os.path.join(args.load_last_model, '*.pt')))
-        base_filepath = args.load_last_model
-        info = create_new_info_dict(vars(args), base_filepath, __file__)
+        print('evaling experiment')
+        if args.load_last_model != '':
+            model_paths = sorted(glob(os.path.join(args.load_last_model, '*.pt')))
+            if not len(model_paths):
+                print('did not find any models at %s'%args.load_last_model)
+            base_filepath = args.load_last_model
+        elif args.model_loadpath != '':
+            base_filepath = os.path.split(args.model_loadpath)[0]
+            model_paths = [args.model_loadpath]
+        else:
+            print('provide model or directory load path')
+            sys.exit()
         for model_loadpath in model_paths:
+            info = create_new_info_dict(vars(args), base_filepath, __file__)
+            info['model_loadpath'] = model_loadpath
             print('running eval on experiment', model_loadpath)
             model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, model_loadpath)
-            call_plot(model_dict, data_dict, info, args.tsne, args.pca)
-            save_latents(model_dict, data_dict, info)
+            if max([args.sample, args.tsne, args.pca]):
+                call_plot(model_dict, data_dict, info, args.tsne, args.pca)
+            base_filepath = info['base_filepath']
+            base_filename = os.path.split(info['model_loadpath'])[1].replace('.pt', '').replace('.cd', '')
+            l_filepath = os.path.join(base_filepath, "%s_output"%(base_filename))
+            if args.save_latents:
+                train_latent_dict, valid_latent_dict = save_latents(l_filepath, model_dict, data_dict, info)
+                classify_latents(l_filepath, train_latent_dict, valid_latent_dict)
+
     else:
         if args.load_last_model != '':
             # load last model from this dir
@@ -620,11 +654,14 @@ if __name__ == '__main__':
         info = create_new_info_dict(vars(args), base_filepath, __file__)
 
         model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, args.model_loadpath)
-        if max([args.sample, args.tsne, args.pca]):
+        if max([args.sample, args.tsne, args.pca, args.save_latents]):
             call_plot(model_dict, data_dict, info, args.tsne, args.pca)
-            save_latents(model_dict, data_dict, info)
-        elif args.save_latents:
-            save_latents(model_dict, data_dict, info)
+            if args.save_latents:
+                base_filepath = info['base_filepath']
+                base_filename = os.path.split(info['model_loadpath'])[1]
+                l_filepath = os.path.join(base_filepath, "%s_%010d_output"%(base_filename, info['train_cnts'][-1]))
+                train_latents_dict, valid_latents_dict = save_latents(l_filepath, model_dict, data_dict, info)
+                classify_latents(l_filepath, train_latent_dict, valid_latent_dict)
         else:
             # only train if we weren't asked to do anything else
             write_log_files(info)
