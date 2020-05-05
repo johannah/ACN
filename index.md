@@ -21,7 +21,7 @@ python train_acn.py -l path_to_model.pt --sample --pca --tsne
 # Results
 
 In the following table, we look at various aspects of the learned ACN codebook and reconstructions. 
-We trained a KNN classifier on the ACN codes and report accuracy on the validation set of FashionMNIST and MNIST. We do not observe a degredation in the classifier's ability to categorize the codebook when a vq_decoder is added. We also show a PCA and TSNE plot for the ACN codebook of each model with points colored according to their true label. 
+We trained a KNN classifier on the ACN codes and report accuracy on the validation set of FashionMNIST and MNIST. We also show a PCA and TSNE plot for the ACN codebook of each model with points colored according to their true label. 
 
 | Data Type | Eval | ACN | ACN-VQ |   
 | --- | --- | --- | --- | 
