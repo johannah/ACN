@@ -16,4 +16,14 @@ python train_mnist_pcnn_acn.py -s -l path_to_model.pt
 ```
 python train_mnist_pcnn_acn.py --tsne -l path_to_model.pt
 ```
+fashion
+6176
+5667
+0404
+9793
+
+
+| ACN | ACN-VQ | 
+| --- | --- |
+| [](results/mnist_acn/mnist_acn_validation_01_0024000000ex_batch_rec_neighbors_valid_006176_plt.png) | [](mnist_acnvq/mnist_acn_vq_vq_00_0024600000ex_batch_rec_neighbors_valid_006176_plt.png) |   
 
