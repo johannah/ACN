@@ -358,7 +358,6 @@ def call_plot(model_dict, data_dict, info, sample, tsne, pca):
                     ax[0,0].set_title('L%sI%s'%(np_label[i], tbatch_index[i]))
                     ax[0,0].set_ylabel('true')
                     ax[0,0].matshow(data[i,0])
-                    ax[1,0].set_title('I%s'%tbatch_index[i])
                     ax[1,0].set_ylabel('rec')
                     ax[1,0].matshow(rec[i,0])
                     ax[2,0].matshow(code[0,0])
