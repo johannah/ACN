@@ -22,6 +22,7 @@ python train_acn.py -l path_to_model.pt --pca --tsne
 | --- | --- | --- | --- | 
 | MNIST | KNN Accuracy | 97% | 97% |  
 | MNIST | PCA | [mnist-acn-pca](results/mnist_acn/mnist_acn_validation_01_0024000000ex_pca_valid.html) | [mnist-acnvq-pca](results/mnist_acnvq/mnist_acn_vq_vq_00_0024600000ex_pca_valid.html) |   
+| MNIST | TSNE | [mnist-acn-tsne](results/mnist_acn/mnist_acn_validation_01_0024000000ex_tsne_valid_P10.html) | [mnist-acnvq-pca](results/mnist_acnvq/mnist_acn_vq_vq_00_0024600000ex_tsne_valid_P10.html) |   
 
 
 | ACN | ACN-VQ | 
