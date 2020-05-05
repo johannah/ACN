@@ -23,6 +23,8 @@ python train_acn.py -l path_to_model.pt --pca --tsne
 | MNIST | KNN Accuracy | 97% | 97% |  
 | MNIST | PCA | [mnist-acn-pca](results/mnist_acn/mnist_acn_validation_01_0024000000ex_pca_valid.html) | [mnist-acnvq-pca](results/mnist_acnvq/mnist_acn_vq_vq_00_0024600000ex_pca_valid.html) |   
 | MNIST | TSNE | [mnist-acn-tsne](results/mnist_acn/mnist_acn_validation_01_0024000000ex_tsne_valid_P10.html) | [mnist-acnvq-pca](results/mnist_acnvq/mnist_acn_vq_vq_00_0024600000ex_tsne_valid_P10.html) |   
+| Fashion | PCA | [fashion-acn-pca](results/fashion_acn/fashion_acn_validation_00_0032400000ex_pca_valid.html) | [mnist-acnvq-pca](results/fashion_acnvq/fashion_acnvq_validation_small_vq_01_0078000000ex_pca_valid.html) |   
+| Fashion | TSNE | [fashion-acn-tsne](results/fashion_acn/fashion_acn_validation_00_0032400000ex_tsne_valid_P10.html) | [mnist-acnvq-pca](results/fashion_acnvq/fashion_acnvq_validation_small_vq_01_0078000000ex_tsne_valid_P10.html) |   
 
 
 | ACN | ACN-VQ | 
