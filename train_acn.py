@@ -311,7 +311,7 @@ def train_acn(train_cnt, epoch_cnt, model_dict, data_dict, info, rescale_inv):
 
         torch.cuda.empty_cache()
 
-def call_plot(model_dict, data_dict, info, tsne, pca):
+def call_plot(model_dict, data_dict, info, sample, tsne, pca):
     from utils import tsne_plot
     from utils import pca_plot
     from sklearn.cluster import KMeans
@@ -340,61 +340,62 @@ def call_plot(model_dict, data_dict, info, tsne, pca):
             # choose limited number to plot
             n = min([20,bs])
             n_neighbors = args.num_k
-            all_neighbor_distances, all_neighbor_indexes = model_dict['prior_model'].kneighbors(u_q_flat, n_neighbors=n_neighbors)
-            all_neighbor_indexes = all_neighbor_indexes.cpu().numpy()
-            all_neighbor_distances = all_neighbor_distances.cpu().numpy()
+            if sample:
+                all_neighbor_distances, all_neighbor_indexes = model_dict['prior_model'].kneighbors(u_q_flat, n_neighbors=n_neighbors)
+                all_neighbor_indexes = all_neighbor_indexes.cpu().numpy()
+                all_neighbor_distances = all_neighbor_distances.cpu().numpy()
 
-            n_cols = 2+n_neighbors
-            tbatch_index = batch_index.cpu().numpy()
-            np_label = label.cpu().numpy()
-            #for i in np.arange(0,n*2,2):
-            for i in np.arange(0,n):
-                # plot each base image
-                plt_path = info['model_loadpath'].replace('.pt', '_batch_rec_neighbors_%s_%06d_plt.png'%(phase,tbatch_index[i]))
-                # bi 5136
-                neighbor_indexes = all_neighbor_indexes[i]
-                code = u_q[i].view((1, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)).cpu().numpy()
-                f,ax = plt.subplots(4,n_cols)
-                ax[0,0].set_title('L%sI%s'%(np_label[i], tbatch_index[i]))
-                ax[0,0].set_ylabel('true')
-                ax[0,0].matshow(data[i,0])
-                ax[1,0].set_title('I%s'%tbatch_index[i])
-                ax[1,0].set_ylabel('rec')
-                ax[1,0].matshow(rec[i,0])
-                ax[2,0].matshow(code[0,0])
-                ax[3,0].matshow(code[0,1])
+                n_cols = 2+n_neighbors
+                tbatch_index = batch_index.cpu().numpy()
+                np_label = label.cpu().numpy()
+                #for i in np.arange(0,n*2,2):
+                for i in np.arange(0,n):
+                    # plot each base image
+                    plt_path = info['model_loadpath'].replace('.pt', '_batch_rec_neighbors_%s_%06d_plt.png'%(phase,tbatch_index[i]))
+                    # bi 5136
+                    neighbor_indexes = all_neighbor_indexes[i]
+                    code = u_q[i].view((1, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)).cpu().numpy()
+                    f,ax = plt.subplots(4,n_cols)
+                    ax[0,0].set_title('L%sI%s'%(np_label[i], tbatch_index[i]))
+                    ax[0,0].set_ylabel('true')
+                    ax[0,0].matshow(data[i,0])
+                    ax[1,0].set_title('I%s'%tbatch_index[i])
+                    ax[1,0].set_ylabel('rec')
+                    ax[1,0].matshow(rec[i,0])
+                    ax[2,0].matshow(code[0,0])
+                    ax[3,0].matshow(code[0,1])
 
-                neighbor_data = torch.stack([data_dict['train'].dataset.indexed_dataset[index][0] for index in neighbor_indexes])
-                neighbor_label = torch.stack([data_dict['train'].dataset.indexed_dataset[index][1] for index in neighbor_indexes])
-                # u_q_flat
-                neighbor_codes_flat = model_dict['prior_model'].codes[neighbor_indexes]
-                neighbor_codes = neighbor_codes_flat.view(n_neighbors, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)
-                if info['vq_decoder']:
-                    neighbor_rec_dml, _, _, _ =  model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
-                else:
-                    neighbor_rec_dml = model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
-                neighbor_data = neighbor_data.cpu().numpy()
-                neighbor_rec_yhat = sample_from_discretized_mix_logistic(neighbor_rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature']).cpu().numpy()
-                for ni in range(n_neighbors):
-                    nindex = all_neighbor_indexes[i,ni].item()
-                    nlabel = neighbor_label[ni].cpu().numpy()
-                    ncode = neighbor_codes[ni].cpu().numpy()
-                    ax[0,ni+2].set_title('L%sI%s'%(nlabel, nindex))
-                    ax[0,ni+2].matshow(neighbor_data[ni,0])
-                    ax[1,ni+2].matshow(neighbor_rec_yhat[ni,0])
-                    ax[2,ni+2].matshow(ncode[0])
-                    ax[3,ni+2].matshow(ncode[1])
-                ax[2,0].set_ylabel('lc0')
-                ax[3,0].set_ylabel('lc1')
-                [ax[xx,0].set_xticks([]) for xx in range(4)]
-                [ax[xx,0].set_yticks([]) for xx in range(4)]
-                for xx in range(4):
-                    [ax[xx,col].axis('off') for col in range(1, n_cols)]
-                plt.subplots_adjust(wspace=0, hspace=0)
-                plt.tight_layout()
-                print('plotting', plt_path)
-                plt.savefig(plt_path)
-                plt.close()
+                    neighbor_data = torch.stack([data_dict['train'].dataset.indexed_dataset[index][0] for index in neighbor_indexes])
+                    neighbor_label = torch.stack([data_dict['train'].dataset.indexed_dataset[index][1] for index in neighbor_indexes])
+                    # u_q_flat
+                    neighbor_codes_flat = model_dict['prior_model'].codes[neighbor_indexes]
+                    neighbor_codes = neighbor_codes_flat.view(n_neighbors, model_dict['acn_model'].bottleneck_channels, model_dict['acn_model'].eo, model_dict['acn_model'].eo)
+                    if info['vq_decoder']:
+                        neighbor_rec_dml, _, _, _ =  model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
+                    else:
+                        neighbor_rec_dml = model_dict['acn_model'].decode(neighbor_codes.to(info['device']))
+                    neighbor_data = neighbor_data.cpu().numpy()
+                    neighbor_rec_yhat = sample_from_discretized_mix_logistic(neighbor_rec_dml, info['nr_logistic_mix'], only_mean=info['sample_mean'], sampling_temperature=info['sampling_temperature']).cpu().numpy()
+                    for ni in range(n_neighbors):
+                        nindex = all_neighbor_indexes[i,ni].item()
+                        nlabel = neighbor_label[ni].cpu().numpy()
+                        ncode = neighbor_codes[ni].cpu().numpy()
+                        ax[0,ni+2].set_title('L%sI%s'%(nlabel, nindex))
+                        ax[0,ni+2].matshow(neighbor_data[ni,0])
+                        ax[1,ni+2].matshow(neighbor_rec_yhat[ni,0])
+                        ax[2,ni+2].matshow(ncode[0])
+                        ax[3,ni+2].matshow(ncode[1])
+                    ax[2,0].set_ylabel('lc0')
+                    ax[3,0].set_ylabel('lc1')
+                    [ax[xx,0].set_xticks([]) for xx in range(4)]
+                    [ax[xx,0].set_yticks([]) for xx in range(4)]
+                    for xx in range(4):
+                        [ax[xx,col].axis('off') for col in range(1, n_cols)]
+                    plt.subplots_adjust(wspace=0, hspace=0)
+                    plt.tight_layout()
+                    print('plotting', plt_path)
+                    plt.savefig(plt_path)
+                    plt.close()
             X = u_q_flat.cpu().numpy()
             #km = KMeans(n_clusters=10)
             #y = km.fit_predict(X)
@@ -623,7 +624,7 @@ if __name__ == '__main__':
             print('running eval on experiment', model_loadpath)
             model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, model_loadpath)
             if max([args.sample, args.tsne, args.pca]):
-                call_plot(model_dict, data_dict, info, args.tsne, args.pca)
+                call_plot(model_dict, data_dict, info, args.sample, args.tsne, args.pca)
             base_filepath = info['base_filepath']
             base_filename = os.path.split(info['model_loadpath'])[1].replace('.pt', '').replace('.cd', '')
             l_filepath = os.path.join(base_filepath, "%s_output"%(base_filename))
@@ -655,7 +656,7 @@ if __name__ == '__main__':
 
         model_dict, data_dict, info, train_cnt, epoch_cnt, rescale, rescale_inv = create_models(info, args.model_loadpath)
         if max([args.sample, args.tsne, args.pca, args.save_latents]):
-            call_plot(model_dict, data_dict, info, args.tsne, args.pca)
+            call_plot(model_dict, data_dict, info, args.sample, args.tsne, args.pca)
             if args.save_latents:
                 base_filepath = info['base_filepath']
                 base_filename = os.path.split(info['model_loadpath'])[1]
