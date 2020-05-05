@@ -1,6 +1,6 @@
 # ACN
 
-Implementation of Associative Compression Networks for Representation Learning ([ACN](https://arxiv.org/abs/1804.02476)) by Graves, Menick, and van den Oord. We also tried using a [VQ-VAE](https://arxiv.org/abs/1711.00937) style decoder (named acnvq). See below for results. 
+Implementation of Associative Compression Networks for Representation Learning ([ACN](https://arxiv.org/abs/1804.02476)) by Graves, Menick, and van den Oord. We also tried using a [VQ-VAE](https://arxiv.org/abs/1711.00937) style decoder (named acnvq) 
 
 # Examples of how to train and sample  
 
