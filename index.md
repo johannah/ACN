@@ -39,12 +39,8 @@ is denoted by its label (L) and its index into the training dataset (I).
 | ACN | ACN-VQ | 
 | --- | --- |
 | ![fashion-acn-0404](results/fashion_acn/fashion_acn_validation_00_0032400000ex_batch_rec_neighbors_valid_000404_plt.png) | ![fashion-acnvq-0404](results/fashion_acnvq/fashion_acnvq_validation_small_vq_01_0078000000ex_batch_rec_neighbors_valid_000404_plt.png) |    
-
 | ![fashion-acn-9793](results/fashion_acn/fashion_acn_validation_00_0032400000ex_batch_rec_neighbors_valid_009793_plt.png) | ![fashion-acnvq-9793](results/fashion_acnvq/fashion_acnvq_validation_small_vq_01_0078000000ex_batch_rec_neighbors_valid_009793_plt.png) |    
-
 | ![fashion-acn-6176](results/fashion_acn/fashion_acn_validation_00_0032400000ex_batch_rec_neighbors_valid_006176_plt.png) | ![fashion-acnvq-6176](results/fashion_acnvq/fashion_acnvq_validation_small_vq_01_0078000000ex_batch_rec_neighbors_valid_006176_plt.png) |    
-
 | ![fashion-acn-5667](results/fashion_acn/fashion_acn_validation_00_0032400000ex_batch_rec_neighbors_valid_005667_plt.png) | ![fashion-acnvq-5667](results/fashion_acnvq/fashion_acnvq_validation_small_vq_01_0078000000ex_batch_rec_neighbors_valid_005667_plt.png) |    
-
 | ![mnist-acn-6176](results/mnist_acn/mnist_acn_validation_01_0024000000ex_batch_rec_neighbors_valid_006176_plt.png) | ![mnist-acnvq-6176](results/mnist_acnvq/mnist_acn_vq_vq_00_0024600000ex_batch_rec_neighbors_valid_006176_plt.png) |   
 
