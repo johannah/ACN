@@ -163,7 +163,8 @@ def pca_plot(X, images, color, serve_port=8104, html_out_path='mpld3.html', serv
     print('adding hover images')
     for nidx in range(images.shape[0]):
         f,ax = plt.subplots()
-        ax.imshow(resize(images[nidx], (180,180)))
+        #ax.imshow(resize(images[nidx], (180,180)))
+        ax.imshow(resize(images[nidx], (90,90)))
         dd = mpld3.fig_to_dict(f)
         img = dd['axes'][0]['images'][0]['data']
         html = '<img src="data:image/png;base64,{0}">'.format(img)
@@ -206,7 +207,8 @@ def tsne_plot(X, images, color, perplexity=5, serve_port=8104, html_out_path='mp
     print('adding hover images')
     for nidx in range(images.shape[0]):
         f,ax = plt.subplots()
-        ax.imshow(resize(images[nidx], (180,180)))
+        #ax.imshow(resize(images[nidx], (80,180)))
+        ax.imshow(resize(images[nidx], (90,90)))
         dd = mpld3.fig_to_dict(f)
         img = dd['axes'][0]['images'][0]['data']
         html = '<img src="data:image/png;base64,{0}">'.format(img)
